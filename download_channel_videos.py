@@ -4,20 +4,8 @@
 download_channel_videos.py
 
 Download all videos (and optionally Shorts) from a YouTube channel using yt-dlp.
-
-Usage (basic):
-    python download_channel_videos.py --url https://www.youtube.com/@PatrickOakleyEllis
-
-Recommended (create an output folder and keep a download archive to avoid duplicates):
-    python download_channel_videos.py \
-        --url https://www.youtube.com/@PatrickOakleyEllis \
-        --output ./downloads \
-        --archive ./downloads/downloaded.txt
-
-Install dependencies first:
-    pip install -r requirements.txt
-    # For best results, also install ffmpeg (on macOS with Homebrew: brew install ffmpeg)
 """
+
 import argparse
 import os
 import sys
@@ -59,12 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--since", default=None, help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
     parser.add_argument("--until", default=None, help="Only download videos uploaded on/before this date (YYYY-MM-DD)")
     parser.add_argument("--max", type=int, default=None, help="Stop after downloading N videos (across tabs)")
-    # FIX: action="store_true" instead of invalid "bool"
     parser.add_argument("--no-shorts", action="store_true", help="Exclude /shorts tab (download only long-form videos)")
     parser.add_argument("--rate-limit", default=None, help="Limit download speed, e.g., 2M or 500K (passed to yt-dlp)")
     parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH). E.g., 5")
     parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
     parser.add_argument("--skip-thumbs", action="store_true", help="Do not download thumbnails")
+    parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.) for authentication")
     return parser.parse_args()
 
 
@@ -81,7 +69,6 @@ def main() -> int:
 
     urls = normalize_channel_urls(args.url, include_shorts=not args.no_shorts)
 
-    # Use channel name folder instead of uploader
     outtmpl = os.path.join(
         args.output,
         "%(channel)s/%(upload_date>%Y-%m-%d)s - %(title).200B [%(id)s].%(ext)s",
@@ -115,6 +102,8 @@ def main() -> int:
         ydl_opts["dateafter"] = ytdlp_date(args.since)
     if args.until:
         ydl_opts["datebefore"] = ytdlp_date(args.until)
+    if args.cookies_from_browser:
+        ydl_opts["cookiesfrombrowser"] = (args.cookies_from_browser,)
 
     downloaded_count = {"n": 0}
     max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
@@ -130,18 +119,21 @@ def main() -> int:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
-                print(f"\n=== Processing: {u} ===")
+                print(f"
+=== Processing: {u} ===")
                 ydl.download([u])
                 if max_total and downloaded_count["n"] >= max_total:
                     break
     except KeyboardInterrupt:
-        print("\nReached max download limit; stopping.")
+        print("
+Reached max download limit; stopping.")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    print("\nAll done.")
+    print("
+All done.")
     return 0
 
 

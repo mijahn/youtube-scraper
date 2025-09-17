@@ -52,7 +52,7 @@ This will:
 - Download from the channel’s **/videos** and **/shorts** tabs
 - Merge best video+audio into MP4
 - Save videos as:  
-  `downloads/<Uploader>/<YYYY-MM-DD> - <Title> [<ID>].<ext>`
+  `downloads/<ChannelName>/<YYYY-MM-DD> - <Title> [<ID>].<ext>`
 - Skip duplicates using the archive file
 
 ---
@@ -65,6 +65,23 @@ This will:
 - `--rate-limit 2M` – throttle speed (e.g., `500K`, `2M`)  
 - `--concurrency 5` – concurrent fragment downloads for HLS/DASH  
 - `--skip-subtitles`, `--skip-thumbs` – skip captions or thumbnails  
+
+---
+
+## 🔐 Authentication (fixing 'Sign in to confirm you're not a bot' errors)
+
+YouTube sometimes blocks downloads unless you are logged in. Use your browser’s cookies:
+
+```bash
+python download_channel_videos.py \
+  --url https://www.youtube.com/@PatrickOakleyEllis \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
+  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --cookies-from-browser chrome
+```
+
+- Supported browsers: `chrome`, `safari`, `firefox`, `edge` (must be logged into YouTube).  
+- Alternative: export cookies with an extension (like **Get cookies.txt**) and pass them with yt-dlp directly, but `--cookies-from-browser` is easier.
 
 ---
 
