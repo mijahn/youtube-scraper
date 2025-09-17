@@ -119,21 +119,18 @@ def main() -> int:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
-                print(f"
-=== Processing: {u} ===")
+                print(f"\n=== Processing: {u} ===")
                 ydl.download([u])
                 if max_total and downloaded_count["n"] >= max_total:
                     break
     except KeyboardInterrupt:
-        print("
-Reached max download limit; stopping.")
+        print("\nReached max download limit; stopping.")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    print("
-All done.")
+    print("\nAll done.")
     return 0
 
 
