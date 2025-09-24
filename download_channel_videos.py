@@ -3,7 +3,7 @@
 """
 download_channel_videos.py
 
-Download all videos (and optionally Shorts) from a YouTube channel using yt-dlp.
+Download all videos (and optionally Shorts) from one or more YouTube channels using yt-dlp.
 """
 
 import argparse
@@ -40,19 +40,20 @@ def normalize_channel_urls(base_url: str, include_shorts: bool = True) -> List[s
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download all videos from a YouTube channel using yt-dlp.")
-    parser.add_argument("--url", required=True, help="Channel URL (e.g., https://www.youtube.com/@SomeCreator)")
+    parser = argparse.ArgumentParser(description="Download all videos from YouTube channels using yt-dlp.")
+    parser.add_argument("--url", help="Single channel URL (e.g., https://www.youtube.com/@SomeCreator)")
+    parser.add_argument("--channels-file", help="Path to a text file with one channel URL per line")
     parser.add_argument("--output", default="./downloads", help="Output directory (default: ./downloads)")
-    parser.add_argument("--archive", default=None, help="Path to a download archive file to skip already downloaded videos (e.g., ./downloads/downloaded.txt)")
+    parser.add_argument("--archive", default=None, help="Path to a download archive file to skip already downloaded videos")
     parser.add_argument("--since", default=None, help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
     parser.add_argument("--until", default=None, help="Only download videos uploaded on/before this date (YYYY-MM-DD)")
-    parser.add_argument("--max", type=int, default=None, help="Stop after downloading N videos (across tabs)")
+    parser.add_argument("--max", type=int, default=None, help="Stop after downloading N videos per channel")
     parser.add_argument("--no-shorts", action="store_true", help="Exclude /shorts tab (download only long-form videos)")
     parser.add_argument("--rate-limit", default=None, help="Limit download speed, e.g., 2M or 500K (passed to yt-dlp)")
-    parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH). E.g., 5")
+    parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH)")
     parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
     parser.add_argument("--skip-thumbs", action="store_true", help="Do not download thumbnails")
-    parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.) for authentication")
+    parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.)")
     return parser.parse_args()
 
 
@@ -63,11 +64,8 @@ def ytdlp_date(s: str) -> str:
         raise SystemExit(f"Invalid date '{s}'. Use YYYY-MM-DD.")
 
 
-def main() -> int:
-    args = parse_args()
-    os.makedirs(args.output, exist_ok=True)
-
-    urls = normalize_channel_urls(args.url, include_shorts=not args.no_shorts)
+def download_channel(url: str, args) -> None:
+    urls = normalize_channel_urls(url, include_shorts=not args.no_shorts)
 
     outtmpl = os.path.join(
         args.output,
@@ -124,11 +122,30 @@ def main() -> int:
                 if max_total and downloaded_count["n"] >= max_total:
                     break
     except KeyboardInterrupt:
-        print("\nReached max download limit; stopping.")
-        return 0
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print("\nReached max download limit for this channel; stopping.")
+
+
+def main() -> int:
+    args = parse_args()
+
+    if not args.url and not args.channels_file:
+        print("Error: You must provide either --url or --channels-file", file=sys.stderr)
         return 1
+
+    os.makedirs(args.output, exist_ok=True)
+
+    if args.channels_file:
+        if not os.path.exists(args.channels_file):
+            print(f"Error: channels file not found: {args.channels_file}", file=sys.stderr)
+            return 1
+        with open(args.channels_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                download_channel(line, args)
+    else:
+        download_channel(args.url, args)
 
     print("\nAll done.")
     return 0

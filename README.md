@@ -1,6 +1,6 @@
 # YouTube Channel Video Downloader
 
-This project provides a Python script to download all videos from a YouTube channel using the actively maintained [yt-dlp](https://github.com/yt-dlp/yt-dlp) library.
+This project provides a Python script to download all videos from one or more YouTube channels using the actively maintained [yt-dlp](https://github.com/yt-dlp/yt-dlp) library.
 
 It supports downloading both **regular videos** and **Shorts**, merges best video+audio into MP4, and avoids duplicates using a download archive.
 
@@ -33,44 +33,7 @@ pip install -r requirements.txt
 
 ## ▶️ Usage
 
-Basic example:
-
-```bash
-python download_channel_videos.py --url https://www.youtube.com/@PatrickOakleyEllis
-```
-
-Recommended (output folder + archive to avoid re-downloading):
-
-```bash
-python download_channel_videos.py \
-  --url https://www.youtube.com/@PatrickOakleyEllis \
-  --output ./downloads \
-  --archive ./downloads/downloaded.txt
-```
-
-This will:
-- Download from the channel’s **/videos** and **/shorts** tabs
-- Merge best video+audio into MP4
-- Save videos as:  
-  `downloads/<ChannelName>/<YYYY-MM-DD> - <Title> [<ID>].<ext>`
-- Skip duplicates using the archive file
-
----
-
-## ⚙️ Options
-
-- `--no-shorts` – exclude Shorts (only long-form videos)  
-- `--since 2024-01-01` / `--until 2024-12-31` – download within date range  
-- `--max 50` – stop after downloading N videos  
-- `--rate-limit 2M` – throttle speed (e.g., `500K`, `2M`)  
-- `--concurrency 5` – concurrent fragment downloads for HLS/DASH  
-- `--skip-subtitles`, `--skip-thumbs` – skip captions or thumbnails  
-
----
-
-## 🔐 Authentication (fixing 'Sign in to confirm you're not a bot' errors)
-
-YouTube sometimes blocks downloads unless you are logged in. Use your browser’s cookies:
+### Single channel
 
 ```bash
 python download_channel_videos.py \
@@ -80,19 +43,41 @@ python download_channel_videos.py \
   --cookies-from-browser chrome
 ```
 
-- Supported browsers: `chrome`, `safari`, `firefox`, `edge` (must be logged into YouTube).  
-- Alternative: export cookies with an extension (like **Get cookies.txt**) and pass them with yt-dlp directly, but `--cookies-from-browser` is easier.
+### Multiple channels via channels.txt
+
+Instead of running multiple commands, keep your channel list in a file called `channels.txt`:
+
+**channels.txt**
+```
+https://www.youtube.com/@EricWTech
+https://www.youtube.com/@indydevdan
+https://www.youtube.com/@buildnpublic
+https://www.youtube.com/@PeterYangYT
+https://www.youtube.com/@PatrickOakleyEllis
+```
+
+Run:
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
+  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --cookies-from-browser chrome
+```
+
+The script will go through each channel listed in `channels.txt` one by one.
 
 ---
 
-## 📺 Multiple Channels
+## ⚙️ Options
 
-Run the script repeatedly with different URLs (using the same archive file prevents duplicates):
-
-```bash
-python download_channel_videos.py --url https://www.youtube.com/@PatrickOakleyEllis --output ./downloads --archive ./downloads/downloaded.txt
-python download_channel_videos.py --url https://www.youtube.com/@SomeOtherCreator     --output ./downloads --archive ./downloads/downloaded.txt
-```
+- `--no-shorts` – exclude Shorts (only long-form videos)  
+- `--since 2024-01-01` / `--until 2024-12-31` – download within date range  
+- `--max 50` – stop after downloading N videos per channel  
+- `--rate-limit 2M` – throttle speed (e.g., `500K`, `2M`)  
+- `--concurrency 5` – concurrent fragment downloads for HLS/DASH  
+- `--skip-subtitles`, `--skip-thumbs` – skip captions or thumbnails  
+- `--cookies-from-browser chrome` – use cookies from your logged-in browser  
 
 ---
 
