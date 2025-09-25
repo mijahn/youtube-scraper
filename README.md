@@ -2,6 +2,10 @@
 
 Download all videos from one or more YouTube channels using [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
+> **Heads up:** The bundled `requirements.txt` pins `yt-dlp` to the latest release that still supports Python 3.8. If you
+> already run Python 3.9+ you can upgrade `yt-dlp` manually, but the pin avoids the "Support for Python version 3.8 has been
+> deprecated" warning on older systems.
+
 ---
 
 ## ▶️ Usage
@@ -55,7 +59,8 @@ python download_channel_videos.py \
   --cookies-from-browser chrome
 ```
 
-Try the following when you begin to see `Video unavailable` messages or 429 HTTP errors:
+The downloader now automatically retries with different YouTube player clients when every download in a batch fails with
+`Video unavailable` so you don't have to restart manually. If rate limits persist, try the following adjustments:
 
 - **Use browser cookies** (`--cookies-from-browser chrome`) so requests look like a real logged-in session.
 - **Slow down the request rate** with the sleep options shown above.
