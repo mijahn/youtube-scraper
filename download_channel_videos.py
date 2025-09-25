@@ -16,14 +16,58 @@ import sys
 import re
 import urllib.request
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 try:
     import yt_dlp
 except ImportError:
     print("yt-dlp is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
+
+
+@dataclass
+class DownloadAttempt:
+    downloaded: int
+    video_unavailable_errors: int
+    other_errors: int
+    stopped_due_to_limit: bool = False
+
+
+class DownloadLogger:
+    """Custom logger that tracks repeated 'Video unavailable' errors."""
+
+    def __init__(self) -> None:
+        self.video_unavailable_errors = 0
+        self.other_errors = 0
+
+    def _print(self, message: str, file=sys.stdout) -> None:
+        print(message, file=file)
+
+    @staticmethod
+    def _ensure_text(message) -> str:
+        if isinstance(message, bytes):
+            return message.decode("utf-8", "ignore")
+        return str(message)
+
+    def debug(self, message) -> None:  # yt-dlp calls this
+        pass
+
+    def info(self, message) -> None:
+        self._print(self._ensure_text(message))
+
+    def warning(self, message) -> None:
+        self._print(self._ensure_text(message), file=sys.stderr)
+
+    def error(self, message) -> None:
+        text = self._ensure_text(message)
+        lowered = text.lower()
+        if "video unavailable" in lowered or "content isn't available" in lowered or "content is not available" in lowered:
+            self.video_unavailable_errors += 1
+        else:
+            self.other_errors += 1
+        self._print(text, file=sys.stderr)
 
 
 def normalize_channel_urls(base_url: str, include_shorts: bool = True) -> List[str]:
@@ -101,9 +145,7 @@ def ytdlp_date(s: str) -> str:
         raise SystemExit(f"Invalid date '{s}'. Use YYYY-MM-DD.")
 
 
-def download_channel(url: str, args) -> None:
-    urls = normalize_channel_urls(url, include_shorts=not args.no_shorts)
-
+def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger, hook) -> dict:
     outtmpl = os.path.join(
         args.output,
         "%(channel)s/%(upload_date>%Y-%m-%d)s - %(title).200B [%(id)s].%(ext)s",
@@ -127,6 +169,8 @@ def download_channel(url: str, args) -> None:
         "download_archive": args.archive,
         "quiet": False,
         "no_warnings": False,
+        "logger": logger,
+        "progress_hooks": [hook],
     }
 
     if args.rate_limit:
@@ -145,31 +189,78 @@ def download_channel(url: str, args) -> None:
         ydl_opts["sleep_interval"] = args.sleep_interval
     if args.max_sleep_interval:
         ydl_opts["max_sleep_interval"] = args.max_sleep_interval
-    if args.youtube_client:
+    if player_client:
         ydl_opts.setdefault("extractor_args", {})
         ydl_opts["extractor_args"].setdefault("youtube", {})
-        ydl_opts["extractor_args"]["youtube"]["player_client"] = [args.youtube_client]
+        ydl_opts["extractor_args"]["youtube"]["player_client"] = [player_client]
 
-    downloaded_count = {"n": 0}
-    max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
+    return ydl_opts
+
+
+def run_download_attempt(urls: List[str], args, player_client: Optional[str], max_total: Optional[int]) -> DownloadAttempt:
+    logger = DownloadLogger()
+    downloaded = 0
+    stopped_due_to_limit = False
 
     def hook(d):
+        nonlocal downloaded, stopped_due_to_limit
         if d.get("status") == "finished":
-            downloaded_count["n"] += 1
-            if max_total and downloaded_count["n"] >= max_total:
+            downloaded += 1
+            if max_total and downloaded >= max_total:
+                stopped_due_to_limit = True
                 raise KeyboardInterrupt
 
-    ydl_opts["progress_hooks"] = [hook]
+    ydl_opts = build_ydl_options(args, player_client, logger, hook)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
                 print(f"\n=== Processing: {u} ===")
                 ydl.download([u])
-                if max_total and downloaded_count["n"] >= max_total:
+                if stopped_due_to_limit:
                     break
     except KeyboardInterrupt:
-        print("\nReached max download limit for this channel; stopping.")
+        if stopped_due_to_limit:
+            print("\nReached max download limit for this channel; stopping.")
+        else:
+            raise
+
+    return DownloadAttempt(
+        downloaded=downloaded,
+        video_unavailable_errors=logger.video_unavailable_errors,
+        other_errors=logger.other_errors,
+        stopped_due_to_limit=stopped_due_to_limit,
+    )
+
+
+def download_channel(url: str, args) -> None:
+    urls = normalize_channel_urls(url, include_shorts=not args.no_shorts)
+    max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
+
+    client_attempts: List[Optional[str]]
+    if args.youtube_client:
+        client_attempts = [args.youtube_client]
+    else:
+        client_attempts = ["web", "android", "ios", "tv"]
+
+    for idx, client in enumerate(client_attempts):
+        result = run_download_attempt(urls, args, client, max_total)
+
+        if result.stopped_due_to_limit:
+            break
+
+        if args.youtube_client:
+            break
+
+        if result.downloaded > 0 or result.other_errors > 0 or result.video_unavailable_errors == 0:
+            break
+
+        if idx < len(client_attempts) - 1:
+            next_client = client_attempts[idx + 1]
+            print(
+                "\nEncountered only 'Video unavailable' errors using the"
+                f" {client!r} client. Retrying with {next_client!r}..."
+            )
 
 
 def load_channels_from_url(url: str) -> List[str]:
