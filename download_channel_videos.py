@@ -15,6 +15,7 @@ import os
 import sys
 import re
 import urllib.request
+import time
 from datetime import datetime
 from typing import List
 
@@ -83,6 +84,12 @@ def parse_args() -> argparse.Namespace:
         choices=["web", "android", "ios", "tv"],
         default=None,
         help="Override the YouTube player client used by yt-dlp (default: yt-dlp decides)",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=float,
+        default=300.0,
+        help="When using --channels-file, seconds between checks for updates (default: 300)",
     )
     return parser.parse_args()
 
@@ -172,6 +179,52 @@ def load_channels_from_url(url: str) -> List[str]:
     return [line.strip() for line in data.splitlines() if line.strip() and not line.strip().startswith("#")]
 
 
+def load_channels_from_file(path: str) -> List[str]:
+    with open(path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+
+
+def watch_channels_file(path: str, args) -> None:
+    interval = args.watch_interval if args.watch_interval and args.watch_interval > 0 else 300.0
+    last_mtime = None
+    last_contents = None
+
+    print(f"Watching {path} for updates (checking every {interval} seconds)...")
+
+    while True:
+        try:
+            mtime = os.path.getmtime(path)
+        except FileNotFoundError:
+            print(f"channels file not found: {path}. Waiting for it to appear...")
+            time.sleep(interval)
+            continue
+
+        if last_mtime is None or mtime != last_mtime:
+            try:
+                channels = load_channels_from_file(path)
+            except OSError as exc:
+                print(f"Failed to read {path}: {exc}")
+                time.sleep(interval)
+                continue
+
+            if not channels:
+                print(f"No channels found in {path}.")
+            elif channels != last_contents:
+                if last_contents is None:
+                    print("Initial channel list loaded. Starting downloads...")
+                else:
+                    print("Detected update to channel list. Re-running downloads...")
+                for line in channels:
+                    download_channel(line, args)
+                last_contents = channels
+            else:
+                print(f"{os.path.basename(path)} timestamp changed but content is the same; skipping downloads.")
+
+            last_mtime = mtime
+
+        time.sleep(interval)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -182,15 +235,11 @@ def main() -> int:
     os.makedirs(args.output, exist_ok=True)
 
     if args.channels_file:
-        if not os.path.exists(args.channels_file):
-            print(f"Error: channels file not found: {args.channels_file}", file=sys.stderr)
-            return 1
-        with open(args.channels_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                download_channel(line, args)
+        try:
+            watch_channels_file(args.channels_file, args)
+        except KeyboardInterrupt:
+            print("\nStopping channel watcher.")
+            return 0
 
     elif args.channels_url:
         urls = load_channels_from_url(args.channels_url)
