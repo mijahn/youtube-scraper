@@ -40,3 +40,24 @@ python3 download_channel_videos.py \
   --cookies-from-browser chrome
 
 ```
+
+### Avoiding temporary rate limiting
+YouTube can temporarily block unauthenticated scraping when too many requests are made in a short period, or when the wrong
+player client is used. A few options have been added to help mitigate this:
+
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --sleep-requests 1.5 \   # wait between HTTP requests
+  --sleep-interval 2 \     # random sleep between downloads (min)
+  --max-sleep-interval 5 \ # random sleep between downloads (max)
+  --youtube-client web \   # force the regular web client instead of TV
+  --cookies-from-browser chrome
+```
+
+Try the following when you begin to see `Video unavailable` messages or 429 HTTP errors:
+
+- **Use browser cookies** (`--cookies-from-browser chrome`) so requests look like a real logged-in session.
+- **Slow down the request rate** with the sleep options shown above.
+- **Force the `web` player client** via `--youtube-client web` to avoid the TV client that Google often rate limits.
+- If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
