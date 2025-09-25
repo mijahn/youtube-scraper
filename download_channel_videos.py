@@ -4,12 +4,17 @@
 download_channel_videos.py
 
 Download all videos (and optionally Shorts) from one or more YouTube channels using yt-dlp.
+Supports:
+- Single channel (--url)
+- Local channels.txt (--channels-file)
+- Remote channels.txt from GitHub or any URL (--channels-url)
 """
 
 import argparse
 import os
 import sys
 import re
+import urllib.request
 from datetime import datetime
 from typing import List
 
@@ -42,7 +47,8 @@ def normalize_channel_urls(base_url: str, include_shorts: bool = True) -> List[s
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download all videos from YouTube channels using yt-dlp.")
     parser.add_argument("--url", help="Single channel URL (e.g., https://www.youtube.com/@SomeCreator)")
-    parser.add_argument("--channels-file", help="Path to a text file with one channel URL per line")
+    parser.add_argument("--channels-file", help="Path to a local text file with one channel URL per line")
+    parser.add_argument("--channels-url", help="URL to a remote channels.txt file (e.g., GitHub raw link)")
     parser.add_argument("--output", default="./downloads", help="Output directory (default: ./downloads)")
     parser.add_argument("--archive", default=None, help="Path to a download archive file to skip already downloaded videos")
     parser.add_argument("--since", default=None, help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
@@ -125,11 +131,18 @@ def download_channel(url: str, args) -> None:
         print("\nReached max download limit for this channel; stopping.")
 
 
+def load_channels_from_url(url: str) -> List[str]:
+    print(f"\nFetching channel list from {url} ...")
+    with urllib.request.urlopen(url) as response:
+        data = response.read().decode("utf-8")
+    return [line.strip() for line in data.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
 def main() -> int:
     args = parse_args()
 
-    if not args.url and not args.channels_file:
-        print("Error: You must provide either --url or --channels-file", file=sys.stderr)
+    if not args.url and not args.channels_file and not args.channels_url:
+        print("Error: You must provide either --url, --channels-file, or --channels-url", file=sys.stderr)
         return 1
 
     os.makedirs(args.output, exist_ok=True)
@@ -144,6 +157,12 @@ def main() -> int:
                 if not line or line.startswith("#"):
                     continue
                 download_channel(line, args)
+
+    elif args.channels_url:
+        urls = load_channels_from_url(args.channels_url)
+        for line in urls:
+            download_channel(line, args)
+
     else:
         download_channel(args.url, args)
 
