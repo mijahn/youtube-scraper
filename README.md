@@ -45,6 +45,22 @@ python3 download_channel_videos.py \
 
 ```
 
+### Ready-to-copy remote command with delays
+Need everything in one line-ready block? Copy the following command to pull the repo-hosted channel list while applying
+every available delay and client mitigation option:
+
+```bash
+python3 download_channel_videos.py \
+  --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
+  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --cookies-from-browser chrome \
+  --sleep-requests 1.5 \
+  --sleep-interval 2 \
+  --max-sleep-interval 5 \
+  --youtube-client web
+```
+
 ### Avoiding temporary rate limiting
 YouTube can temporarily block unauthenticated scraping when too many requests are made in a short period, or when the wrong
 player client is used. A few options have been added to help mitigate this:
