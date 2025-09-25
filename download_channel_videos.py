@@ -60,6 +60,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
     parser.add_argument("--skip-thumbs", action="store_true", help="Do not download thumbnails")
     parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.)")
+    parser.add_argument(
+        "--sleep-requests",
+        type=float,
+        default=None,
+        help="Seconds to sleep between HTTP requests (helps avoid rate limiting)",
+    )
+    parser.add_argument(
+        "--sleep-interval",
+        type=float,
+        default=None,
+        help="Minimum randomized sleep between video downloads",
+    )
+    parser.add_argument(
+        "--max-sleep-interval",
+        type=float,
+        default=None,
+        help="Maximum randomized sleep between video downloads",
+    )
+    parser.add_argument(
+        "--youtube-client",
+        choices=["web", "android", "ios", "tv"],
+        default=None,
+        help="Override the YouTube player client used by yt-dlp (default: yt-dlp decides)",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +132,16 @@ def download_channel(url: str, args) -> None:
         ydl_opts["datebefore"] = ytdlp_date(args.until)
     if args.cookies_from_browser:
         ydl_opts["cookiesfrombrowser"] = (args.cookies_from_browser,)
+    if args.sleep_requests:
+        ydl_opts["sleep_interval_requests"] = args.sleep_requests
+    if args.sleep_interval:
+        ydl_opts["sleep_interval"] = args.sleep_interval
+    if args.max_sleep_interval:
+        ydl_opts["max_sleep_interval"] = args.max_sleep_interval
+    if args.youtube_client:
+        ydl_opts.setdefault("extractor_args", {})
+        ydl_opts["extractor_args"].setdefault("youtube", {})
+        ydl_opts["extractor_args"]["youtube"]["player_client"] = [args.youtube_client]
 
     downloaded_count = {"n": 0}
     max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
