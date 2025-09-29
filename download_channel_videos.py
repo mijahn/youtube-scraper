@@ -18,7 +18,8 @@ import urllib.request
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from enum import Enum
+from typing import List, Optional, Tuple
 
 try:
     import yt_dlp
@@ -70,36 +71,107 @@ class DownloadLogger:
         self._print(text, file=sys.stderr)
 
 
-def normalize_channel_urls(base_url: str, include_shorts: bool = True) -> List[str]:
-    url = base_url.strip()
-    if not url.startswith("http"):
-        url = "https://" + url
-    url = url.rstrip("/")
+class SourceType(Enum):
+    CHANNEL = "channel"
+    PLAYLIST = "playlist"
+    VIDEO = "video"
 
-    if re.search(r"/(videos|shorts|streams|live)$", url):
-        urls = [url]
-    else:
-        urls = [url + "/videos"]
 
-    if include_shorts:
-        shorts_url = url + "/shorts"
-        if shorts_url not in urls:
-            urls.append(shorts_url)
+@dataclass(frozen=True)
+class Source:
+    kind: SourceType
+    url: str
 
-    return urls
+    def build_download_urls(self, include_shorts: bool = True) -> List[str]:
+        normalized = normalize_url(self.url)
+
+        if self.kind is SourceType.CHANNEL:
+            urls: List[str]
+            if re.search(r"/(videos|shorts|streams|live)$", normalized):
+                urls = [normalized]
+            else:
+                urls = [normalized + "/videos"]
+
+            if include_shorts:
+                shorts_url = normalized + "/shorts"
+                if shorts_url not in urls:
+                    urls.append(shorts_url)
+            return urls
+
+        return [normalized]
+
+
+def normalize_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("missing URL")
+
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", cleaned):
+        cleaned = "https://" + cleaned.lstrip("/")
+
+    return cleaned.rstrip("/")
+
+
+def parse_source_line(line: str) -> Optional[Source]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+
+    prefix_map = {
+        "channel": SourceType.CHANNEL,
+        "channels": SourceType.CHANNEL,
+        "ch": SourceType.CHANNEL,
+        "playlist": SourceType.PLAYLIST,
+        "list": SourceType.PLAYLIST,
+        "video": SourceType.VIDEO,
+        "vid": SourceType.VIDEO,
+    }
+
+    if ":" in stripped:
+        prefix, rest = stripped.split(":", 1)
+        kind_key = prefix.strip().lower()
+        if kind_key in prefix_map:
+            url = rest.strip()
+            if not url:
+                raise ValueError("missing URL after prefix")
+            return Source(prefix_map[kind_key], url)
+
+    # Default to channel when no known prefix is supplied.
+    return Source(SourceType.CHANNEL, stripped)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download all videos from YouTube channels using yt-dlp.")
-    parser.add_argument("--url", help="Single channel URL (e.g., https://www.youtube.com/@SomeCreator)")
-    parser.add_argument("--channels-file", help="Path to a local text file with one channel URL per line")
-    parser.add_argument("--channels-url", help="URL to a remote channels.txt file (e.g., GitHub raw link)")
+    parser = argparse.ArgumentParser(
+        description="Download videos from YouTube channels, playlists, or single videos using yt-dlp."
+    )
+    parser.add_argument(
+        "--url",
+        help=(
+            "Single source URL. Prefix with 'channel:', 'playlist:', or 'video:' to override autodetection"
+            " (default assumes channel)."
+        ),
+    )
+    parser.add_argument(
+        "--channels-file",
+        help="Path to a local text file with one source per line (supports optional 'channel:', 'playlist:', 'video:' prefixes)",
+    )
+    parser.add_argument(
+        "--channels-url",
+        help=(
+            "URL to a remote channels.txt file (e.g., GitHub raw link). Each non-comment line"
+            " can optionally start with 'channel:', 'playlist:', or 'video:'."
+        ),
+    )
     parser.add_argument("--output", default="./downloads", help="Output directory (default: ./downloads)")
     parser.add_argument("--archive", default=None, help="Path to a download archive file to skip already downloaded videos")
     parser.add_argument("--since", default=None, help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
     parser.add_argument("--until", default=None, help="Only download videos uploaded on/before this date (YYYY-MM-DD)")
     parser.add_argument("--max", type=int, default=None, help="Stop after downloading N videos per channel")
-    parser.add_argument("--no-shorts", action="store_true", help="Exclude /shorts tab (download only long-form videos)")
+    parser.add_argument(
+        "--no-shorts",
+        action="store_true",
+        help="Exclude /shorts tab when downloading channel sources",
+    )
     parser.add_argument("--rate-limit", default=None, help="Limit download speed, e.g., 2M or 500K (passed to yt-dlp)")
     parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH)")
     parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
@@ -221,7 +293,7 @@ def run_download_attempt(urls: List[str], args, player_client: Optional[str], ma
                     break
     except KeyboardInterrupt:
         if stopped_due_to_limit:
-            print("\nReached max download limit for this channel; stopping.")
+            print("\nReached max download limit for this source; stopping.")
         else:
             raise
 
@@ -233,8 +305,15 @@ def run_download_attempt(urls: List[str], args, player_client: Optional[str], ma
     )
 
 
-def download_channel(url: str, args) -> None:
-    urls = normalize_channel_urls(url, include_shorts=not args.no_shorts)
+def download_source(source: Source, args) -> None:
+    try:
+        urls = source.build_download_urls(include_shorts=not args.no_shorts)
+        display_url = normalize_url(source.url)
+    except ValueError as exc:
+        print(f"Skipping {source.kind.value} source due to invalid URL: {exc}", file=sys.stderr)
+        return
+
+    print(f"\n=== Starting downloads for {source.kind.value}: {display_url} ===")
     max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
 
     client_attempts: List[Optional[str]]
@@ -263,22 +342,46 @@ def download_channel(url: str, args) -> None:
             )
 
 
-def load_channels_from_url(url: str) -> List[str]:
-    print(f"\nFetching channel list from {url} ...")
+def load_sources_from_url(url: str) -> List[Source]:
+    print(f"\nFetching source list from {url} ...")
     with urllib.request.urlopen(url) as response:
         data = response.read().decode("utf-8")
-    return [line.strip() for line in data.splitlines() if line.strip() and not line.strip().startswith("#")]
+    sources: List[Source] = []
+    for idx, line in enumerate(data.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = parse_source_line(stripped)
+        except ValueError as exc:
+            raise SystemExit(f"Failed to parse line {idx} from {url}: {exc}")
+        if parsed:
+            sources.append(parsed)
+    return sources
 
 
-def load_channels_from_file(path: str) -> List[str]:
+def load_sources_from_file(path: str) -> Tuple[List[Source], List[str]]:
+    sources: List[Source] = []
+    raw_lines: List[str] = []
     with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        for idx, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                parsed = parse_source_line(stripped)
+            except ValueError as exc:
+                raise ValueError(f"{path}:{idx}: {exc}") from exc
+            if parsed:
+                sources.append(parsed)
+                raw_lines.append(stripped)
+    return sources, raw_lines
 
 
 def watch_channels_file(path: str, args) -> None:
     interval = args.watch_interval if args.watch_interval and args.watch_interval > 0 else 300.0
     last_mtime = None
-    last_contents = None
+    last_contents: Optional[List[str]] = None
 
     print(f"Watching {path} for updates (checking every {interval} seconds)...")
 
@@ -292,22 +395,26 @@ def watch_channels_file(path: str, args) -> None:
 
         if last_mtime is None or mtime != last_mtime:
             try:
-                channels = load_channels_from_file(path)
+                sources, raw_lines = load_sources_from_file(path)
             except OSError as exc:
                 print(f"Failed to read {path}: {exc}")
                 time.sleep(interval)
                 continue
+            except ValueError as exc:
+                print(exc)
+                time.sleep(interval)
+                continue
 
-            if not channels:
-                print(f"No channels found in {path}.")
-            elif channels != last_contents:
+            if not sources:
+                print(f"No sources found in {path}.")
+            elif raw_lines != last_contents:
                 if last_contents is None:
                     print("Initial channel list loaded. Starting downloads...")
                 else:
                     print("Detected update to channel list. Re-running downloads...")
-                for line in channels:
-                    download_channel(line, args)
-                last_contents = channels
+                for source in sources:
+                    download_source(source, args)
+                last_contents = raw_lines
             else:
                 print(f"{os.path.basename(path)} timestamp changed but content is the same; skipping downloads.")
 
@@ -333,12 +440,16 @@ def main() -> int:
             return 0
 
     elif args.channels_url:
-        urls = load_channels_from_url(args.channels_url)
-        for line in urls:
-            download_channel(line, args)
+        sources = load_sources_from_url(args.channels_url)
+        for source in sources:
+            download_source(source, args)
 
     else:
-        download_channel(args.url, args)
+        parsed = parse_source_line(args.url.strip()) if args.url else None
+        if not parsed:
+            print("Error: Provided --url is empty or a comment", file=sys.stderr)
+            return 1
+        download_source(parsed, args)
 
     print("\nAll done.")
     return 0

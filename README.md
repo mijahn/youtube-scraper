@@ -19,7 +19,7 @@ python download_channel_videos.py \
   --cookies-from-browser chrome
 ```
 
-### Multiple channels (local channels.txt)
+### Multiple sources (local channels.txt)
 ```bash
 python download_channel_videos.py \
   --channels-file channels.txt \
@@ -28,7 +28,7 @@ python download_channel_videos.py \
   --cookies-from-browser chrome
 ```
 
-### Multiple channels (remote GitHub repo)
+### Multiple sources (remote GitHub repo)
 If your `channels.txt` is in a public GitHub repo, copy the **raw** link, e.g.:
 
 ```
@@ -82,3 +82,26 @@ The downloader now automatically retries with different YouTube player clients w
 - **Slow down the request rate** with the sleep options shown above.
 - **Force the `web` player client** via `--youtube-client web` to avoid the TV client that Google often rate limits.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
+
+## channels.txt format tips
+
+- Lines beginning with `#` are ignored, which lets you organize related sources into sections.
+- Each non-comment line can optionally start with a prefix to specify the source type:
+  - `channel: https://www.youtube.com/@SomeCreator`
+  - `playlist: https://www.youtube.com/playlist?list=...`
+  - `video: https://www.youtube.com/watch?v=...`
+- If you omit the prefix the script assumes the entry is a channel and automatically fetches both the `/videos` and `/shorts`
+  tabs (unless you pass `--no-shorts`).
+
+Example:
+
+```
+# channels
+channel: https://www.youtube.com/@EricWTech
+
+# curated playlists
+playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
+
+# favorite talks
+video: https://www.youtube.com/watch?v=Dif1hwBejCk
+```
