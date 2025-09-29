@@ -1,3 +1,4 @@
+# channels
 https://www.youtube.com/@EricWTech
 https://www.youtube.com/@indydevdan
 https://www.youtube.com/@buildnpublic
@@ -16,3 +17,10 @@ https://www.youtube.com/@iamseankochel
 https://www.youtube.com/@AIOriented
 https://www.youtube.com/@aiunleashed509
 https://www.youtube.com/@CodieSanchezCT
+https://www.youtube.com/@DenDev
+
+#lists
+https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
+
+# videos
+https://www.youtube.com/watch?v=Dif1hwBejCk
