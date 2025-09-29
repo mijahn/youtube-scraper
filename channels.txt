@@ -18,9 +18,12 @@ channel: https://www.youtube.com/@AIOriented
 channel: https://www.youtube.com/@aiunleashed509
 channel: https://www.youtube.com/@CodieSanchezCT
 channel: https://www.youtube.com/@DenDev
+channel: https://www.youtube.com/@howiaipodcast
+channel: https://www.youtube.com/@LennysPodcast
 
 #lists
 playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
+playlist: https://www.youtube.com/playlist?list=PLzKwf01g-ajWthpdlugcAJ9eB96YZzjIv
 
 # videos
 video: https://www.youtube.com/watch?v=Dif1hwBejCk
