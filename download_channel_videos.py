@@ -39,6 +39,30 @@ class DownloadAttempt:
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
+    VIDEO_UNAVAILABLE_PATTERNS = (
+        "video unavailable",
+        "content isn't available",
+        "content is not available",
+        "available to members",
+        "members-only",
+        "join this channel to get access",
+        "age-restricted",
+        "sign in to confirm your age",
+        "not available in your country",
+        "not available in your location",
+        "unavailable in your country",
+        "blocked in your country",
+        "unavailable in your location",
+        "http error 403",
+        "403: forbidden",
+        "error 403",
+        "403 forbidden",
+        "http error 410",
+        "error 410",
+        "410: gone",
+        "410 gone",
+    )
+
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
@@ -64,7 +88,7 @@ class DownloadLogger:
     def error(self, message) -> None:
         text = self._ensure_text(message)
         lowered = text.lower()
-        if "video unavailable" in lowered or "content isn't available" in lowered or "content is not available" in lowered:
+        if any(pattern in lowered for pattern in self.VIDEO_UNAVAILABLE_PATTERNS):
             self.video_unavailable_errors += 1
         else:
             self.other_errors += 1
