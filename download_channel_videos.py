@@ -20,10 +20,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Set, Tuple
+from typing import Callable, Iterable, List, Optional, Set, Tuple
 
 try:
     import yt_dlp
+    from yt_dlp.utils import DownloadError, ExtractorError
 except ImportError:
     print("yt-dlp is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
@@ -40,12 +41,34 @@ class DownloadAttempt:
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
+    UNAVAILABLE_FRAGMENTS = (
+        "video unavailable",
+        "content isn't available",
+        "content is not available",
+        "channel members",
+        "members-only",
+        "requires purchase",
+        "http error 410",
+        "sign in to confirm your age",
+        "age-restricted",
+        "this video is private",
+        "the uploader has not made this video available",
+        "this video can only be played",
+    )
+
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
 
     def _print(self, message: str, file=sys.stdout) -> None:
         print(message, file=file)
+
+    def _handle_message(self, text: str) -> None:
+        lowered = text.lower()
+        if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
+            self.video_unavailable_errors += 1
+        else:
+            self.other_errors += 1
 
     @staticmethod
     def _ensure_text(message) -> str:
@@ -64,21 +87,13 @@ class DownloadLogger:
 
     def error(self, message) -> None:
         text = self._ensure_text(message)
-        lowered = text.lower()
-        unavailable_fragments = (
-            "video unavailable",
-            "content isn't available",
-            "content is not available",
-            "channel members",
-            "members-only",
-            "requires purchase",
-            "http error 410",
-        )
-        if any(fragment in lowered for fragment in unavailable_fragments):
-            self.video_unavailable_errors += 1
-        else:
-            self.other_errors += 1
         self._print(text, file=sys.stderr)
+        self._handle_message(text)
+
+    def record_exception(self, exc: Exception) -> None:
+        text = self._ensure_text(str(exc))
+        self._print(text, file=sys.stderr)
+        self._handle_message(text)
 
 
 class SourceType(Enum):
@@ -109,6 +124,9 @@ class Source:
             return urls
 
         return [normalized]
+
+
+DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = ("web", "android", "ios", "tv")
 
 
 def normalize_url(url: str) -> str:
@@ -235,7 +253,28 @@ def ytdlp_date(s: str) -> str:
         raise SystemExit(f"Invalid date '{s}'. Use YYYY-MM-DD.")
 
 
-def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger, hook) -> dict:
+def _combine_match_filters(filters: Iterable[Callable[[dict], Optional[str]]]) -> Optional[Callable[[dict], Optional[str]]]:
+    filters = tuple(f for f in filters if f is not None)
+    if not filters:
+        return None
+
+    def combined(info_dict: dict) -> Optional[str]:
+        for flt in filters:
+            result = flt(info_dict)
+            if result:
+                return result
+        return None
+
+    return combined
+
+
+def build_ydl_options(
+    args,
+    player_client: Optional[str],
+    logger: DownloadLogger,
+    hook,
+    additional_filters: Optional[Iterable[Callable[[dict], Optional[str]]]] = None,
+) -> dict:
     outtmpl = os.path.join(
         args.output,
         "%(channel)s/%(upload_date>%Y-%m-%d)s - %(title).200B [%(id)s].%(ext)s",
@@ -279,9 +318,11 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
         ydl_opts["sleep_interval"] = args.sleep_interval
     if args.max_sleep_interval:
         ydl_opts["max_sleep_interval"] = args.max_sleep_interval
+    filters: List[Callable[[dict], Optional[str]]] = []
+
     if not args.allow_restricted:
 
-        def restricted_match_filter(info_dict):
+        def restricted_match_filter(info_dict: dict) -> Optional[str]:
             reasons = []
 
             availability = info_dict.get("availability")
@@ -311,7 +352,7 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
                 reasons.append("YouTube Premium only")
 
             if reasons:
-                unique_reasons = []
+                unique_reasons: List[str] = []
                 seen = set()
                 for reason in reasons:
                     if reason not in seen:
@@ -323,12 +364,19 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
 
             return None
 
-        ydl_opts["match_filter"] = restricted_match_filter
+        filters.append(restricted_match_filter)
 
     if player_client:
         ydl_opts.setdefault("extractor_args", {})
         ydl_opts["extractor_args"].setdefault("youtube", {})
         ydl_opts["extractor_args"]["youtube"]["player_client"] = [player_client]
+
+    if additional_filters:
+        filters.extend(additional_filters)
+
+    combined_filter = _combine_match_filters(filters)
+    if combined_filter:
+        ydl_opts["match_filter"] = combined_filter
 
     return ydl_opts
 
@@ -363,24 +411,31 @@ def run_download_attempt(
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
 
-    ydl_opts = build_ydl_options(args, player_client, logger, hook)
+    extra_filters: List[Callable[[dict], Optional[str]]] = []
 
     if args.archive is None:
         # Avoid re-downloading videos that completed successfully during
         # earlier client attempts in this invocation.
-        def match_filter(info_dict):
+        def match_filter(info_dict: dict) -> Optional[str]:
             video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
             if video_id and video_id in seen_ids:
                 return "Video already downloaded during previous client attempt"
             return None
 
-        ydl_opts["match_filter"] = match_filter
+        extra_filters.append(match_filter)
+
+    ydl_opts = build_ydl_options(args, player_client, logger, hook, extra_filters)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
                 print(f"\n=== Processing: {u} ===")
-                ydl.download([u])
+                try:
+                    ydl.download([u])
+                except (DownloadError, ExtractorError) as exc:
+                    logger.record_exception(exc)
+                except Exception as exc:  # pragma: no cover - defensive safety net
+                    logger.record_exception(exc)
                 if stopped_due_to_limit:
                     break
     except KeyboardInterrupt:
@@ -395,6 +450,17 @@ def run_download_attempt(
         other_errors=logger.other_errors,
         stopped_due_to_limit=stopped_due_to_limit,
     )
+
+
+def format_attempt_summary(attempt: DownloadAttempt) -> str:
+    parts = [f"{attempt.downloaded} downloaded"]
+    if attempt.video_unavailable_errors:
+        parts.append(f"{attempt.video_unavailable_errors} unavailable")
+    if attempt.other_errors:
+        parts.append(f"{attempt.other_errors} other errors")
+    if attempt.stopped_due_to_limit:
+        parts.append("stopped due to limit")
+    return ", ".join(parts)
 
 
 def download_source(source: Source, args) -> None:
@@ -412,12 +478,26 @@ def download_source(source: Source, args) -> None:
     if args.youtube_client:
         client_attempts = [args.youtube_client]
     else:
-        client_attempts = ["web", "android", "ios", "tv"]
+        client_attempts = list(DEFAULT_PLAYER_CLIENTS)
 
     downloaded_ids: Set[str] = set()
+    total_downloaded = 0
+    total_unavailable = 0
+    total_other_errors = 0
+    last_result: Optional[DownloadAttempt] = None
 
     for idx, client in enumerate(client_attempts):
         result = run_download_attempt(urls, args, client, max_total, downloaded_ids)
+        last_result = result
+
+        total_downloaded += result.downloaded
+        total_unavailable += result.video_unavailable_errors
+        total_other_errors += result.other_errors
+
+        client_label = client if client else "default"
+        print(
+            f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
+        )
 
         if result.stopped_due_to_limit:
             break
@@ -438,6 +518,25 @@ def download_source(source: Source, args) -> None:
         print(
             "\nEncountered only 'Video unavailable' errors using the"
             f" {client!r} client. Retrying with {next_client!r}..."
+        )
+
+    if (
+        not args.allow_restricted
+        and total_downloaded == 0
+        and total_unavailable > 0
+        and total_other_errors == 0
+    ):
+        print(
+            "\nAll attempts resulted in restricted or unavailable videos. "
+            "Provide authentication (e.g., --cookies-from-browser) or rerun with "
+            "--allow-restricted to skip them.",
+            file=sys.stderr,
+        )
+
+    if last_result and total_other_errors > 0:
+        print(
+            f"Encountered {total_other_errors} download errors. See logs above for details.",
+            file=sys.stderr,
         )
 
 
