@@ -36,7 +36,9 @@ def make_args(**overrides):
         "max": None,
     }
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    args = SimpleNamespace(**defaults)
+    dc.apply_authentication_defaults(args, environ={})
+    return args
 
 
 def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,3 +90,43 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
     assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
     assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
     assert calls[1]["target_video_ids"] == {"retry-id"}
+
+
+def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    args = make_args()
+
+    calls = []
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+    ):
+        calls.append({"client": client, "urls": tuple(urls)})
+        if len(calls) == 1:
+            return dc.DownloadAttempt(
+                downloaded=0,
+                video_unavailable_errors=0,
+                other_errors=2,
+                retryable_error_ids=set(),
+                stopped_due_to_limit=False,
+            )
+        return dc.DownloadAttempt(
+            downloaded=1,
+            video_unavailable_errors=0,
+            other_errors=0,
+            retryable_error_ids=set(),
+            stopped_due_to_limit=False,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    assert len(calls) == 2
+    assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
+    assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
