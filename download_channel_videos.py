@@ -16,10 +16,10 @@ import sys
 import re
 import urllib.request
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 try:
     import yt_dlp
@@ -34,6 +34,7 @@ class DownloadAttempt:
     video_unavailable_errors: int
     other_errors: int
     stopped_due_to_limit: bool = False
+    downloaded_ids: Set[str] = field(default_factory=set)
 
 
 class DownloadLogger:
@@ -269,20 +270,43 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
     return ydl_opts
 
 
-def run_download_attempt(urls: List[str], args, player_client: Optional[str], max_total: Optional[int]) -> DownloadAttempt:
+def run_download_attempt(
+    urls: List[str],
+    args,
+    player_client: Optional[str],
+    max_total: Optional[int],
+    skip_ids: Optional[Set[str]] = None,
+) -> DownloadAttempt:
     logger = DownloadLogger()
     downloaded = 0
     stopped_due_to_limit = False
+    downloaded_ids: Set[str] = set()
+
+    skip_ids = set(skip_ids or [])
 
     def hook(d):
         nonlocal downloaded, stopped_due_to_limit
         if d.get("status") == "finished":
             downloaded += 1
+            info = d.get("info_dict") or {}
+            video_id = info.get("id")
+            if video_id:
+                downloaded_ids.add(video_id)
+                skip_ids.add(video_id)
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
 
     ydl_opts = build_ydl_options(args, player_client, logger, hook)
+
+    if skip_ids:
+        def match_filter(info_dict, *, incomplete):
+            video_id = info_dict.get("id")
+            if video_id and video_id in skip_ids:
+                return "already-downloaded"
+            return None
+
+        ydl_opts["match_filter"] = match_filter
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -302,6 +326,7 @@ def run_download_attempt(urls: List[str], args, player_client: Optional[str], ma
         video_unavailable_errors=logger.video_unavailable_errors,
         other_errors=logger.other_errors,
         stopped_due_to_limit=stopped_due_to_limit,
+        downloaded_ids=downloaded_ids,
     )
 
 
@@ -322,8 +347,11 @@ def download_source(source: Source, args) -> None:
     else:
         client_attempts = ["web", "android", "ios", "tv"]
 
+    downloaded_ids: Set[str] = set()
+
     for idx, client in enumerate(client_attempts):
-        result = run_download_attempt(urls, args, client, max_total)
+        result = run_download_attempt(urls, args, client, max_total, skip_ids=downloaded_ids)
+        downloaded_ids.update(result.downloaded_ids)
 
         if result.stopped_due_to_limit:
             break
@@ -331,7 +359,7 @@ def download_source(source: Source, args) -> None:
         if args.youtube_client:
             break
 
-        if result.downloaded > 0 or result.other_errors > 0 or result.video_unavailable_errors == 0:
+        if result.other_errors > 0 or result.video_unavailable_errors == 0:
             break
 
         if idx < len(client_attempts) - 1:
