@@ -344,8 +344,9 @@ def run_download_attempt(
     logger = DownloadLogger()
     downloaded = 0
     stopped_due_to_limit = False
+    seen_ids: Set[str]
     if downloaded_ids is not None:
-        seen_ids: Set[str] = downloaded_ids
+        seen_ids = downloaded_ids
     else:
         seen_ids = set()
     newly_downloaded_ids: Set[str] = set()
