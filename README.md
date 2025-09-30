@@ -55,10 +55,10 @@ python3 download_channel_videos.py \
   --output "/Volumes/Micha 4TB/youtube downloads" \
   --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
   --cookies-from-browser chrome \
+  --youtube-client web \
   --sleep-requests 1.5 \
   --sleep-interval 2 \
-  --max-sleep-interval 5 \
-  --youtube-client web
+  --max-sleep-interval 5
 ```
 
 ### Avoiding temporary rate limiting
