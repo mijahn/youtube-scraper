@@ -1,30 +1,30 @@
 # channels
-https://www.youtube.com/@EricWTech
-https://www.youtube.com/@indydevdan
-https://www.youtube.com/@buildnpublic
-https://www.youtube.com/@PeterYangYT
-https://www.youtube.com/@PatrickOakleyEllis
-https://www.youtube.com/@AddyOsmani
-https://www.youtube.com/@danielpinktv
-https://www.youtube.com/@TheFeatureCrew
-https://www.youtube.com/@Mark_Kashef
-https://www.youtube.com/@ThatNateBlack
-https://www.youtube.com/@TimRunia
-https://www.youtube.com/@GregIsenberg
-https://www.youtube.com/@SimonHoiberg
-https://www.youtube.com/@LowLevelTV
-https://www.youtube.com/@iamseankochel
-https://www.youtube.com/@AIOriented
-https://www.youtube.com/@aiunleashed509
-https://www.youtube.com/@CodieSanchezCT
-https://www.youtube.com/@DenDev
-https://www.youtube.com/@howiaipodcast
-https://www.youtube.com/@LennysPodcast
+channel: https://www.youtube.com/@EricWTech
+channel: https://www.youtube.com/@indydevdan
+channel: https://www.youtube.com/@buildnpublic
+channel: https://www.youtube.com/@PeterYangYT
+channel: https://www.youtube.com/@PatrickOakleyEllis
+channel: https://www.youtube.com/@AddyOsmani
+channel: https://www.youtube.com/@danielpinktv
+channel: https://www.youtube.com/@TheFeatureCrew
+channel: https://www.youtube.com/@Mark_Kashef
+channel: https://www.youtube.com/@ThatNateBlack
+channel: https://www.youtube.com/@TimRunia
+channel: https://www.youtube.com/@GregIsenberg
+channel: https://www.youtube.com/@SimonHoiberg
+channel: https://www.youtube.com/@LowLevelTV
+channel: https://www.youtube.com/@iamseankochel
+channel: https://www.youtube.com/@AIOriented
+channel: https://www.youtube.com/@aiunleashed509
+channel: https://www.youtube.com/@CodieSanchezCT
+channel: https://www.youtube.com/@DenDev
+channel: https://www.youtube.com/@howiaipodcast
+channel: https://www.youtube.com/@LennysPodcast
 
 # lists
-https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
-https://www.youtube.com/playlist?list=PLzKwf01g-ajWthpdlugcAJ9eB96YZzjIv
-https://www.youtube.com/playlist?list=PL8gDpwTEj4yIPs6WpjqavbAY8eFN9tWHh
+playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
+playlist: https://www.youtube.com/playlist?list=PLzKwf01g-ajWthpdlugcAJ9eB96YZzjIv
+playlist: https://www.youtube.com/playlist?list=PL8gDpwTEj4yIPs6WpjqavbAY8eFN9tWHh
 
 # videos
-https://www.youtube.com/watch?v=Dif1hwBejCk
+video: https://www.youtube.com/watch?v=Dif1hwBejCk
