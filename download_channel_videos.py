@@ -56,6 +56,10 @@ class DownloadLogger:
         "this video can only be played",
     )
 
+    IGNORED_FRAGMENTS = (
+        "does not have a shorts tab",
+    )
+
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
@@ -65,6 +69,9 @@ class DownloadLogger:
 
     def _handle_message(self, text: str) -> None:
         lowered = text.lower()
+        if any(fragment in lowered for fragment in self.IGNORED_FRAGMENTS):
+            return
+
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
         else:
