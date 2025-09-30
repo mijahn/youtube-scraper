@@ -17,9 +17,9 @@ import download_channel_videos as dc
     [
         ("https://example.com # trailing", dc.SourceType.CHANNEL, "https://example.com"),
         (
-            "https://example.com/watch?v=1#fragment # keep fragment",
-            dc.SourceType.CHANNEL,
-            "https://example.com/watch?v=1#fragment",
+            "https://youtu.be/abc123 # infer video",
+            dc.SourceType.VIDEO,
+            "https://youtu.be/abc123",
         ),
         (
             "playlist: https://example.com/list # playlist comment",
@@ -43,3 +43,20 @@ def test_parse_source_line_strips_inline_comments(raw, expected_kind, expected_u
 def test_parse_source_line_missing_url_after_comment():
     with pytest.raises(ValueError):
         dc.parse_source_line("channel:    # comment only")
+
+
+@pytest.mark.parametrize(
+    "raw, expected_kind",
+    [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", dc.SourceType.VIDEO),
+        ("https://www.youtube.com/shorts/abc123", dc.SourceType.VIDEO),
+        ("https://www.youtube.com/live/xyz", dc.SourceType.VIDEO),
+        ("https://www.youtube.com/playlist?list=PL123", dc.SourceType.PLAYLIST),
+        ("https://www.youtube.com/@OpenAI", dc.SourceType.CHANNEL),
+        ("https://www.youtube.com/channel/UC123", dc.SourceType.CHANNEL),
+    ],
+)
+def test_infer_source_kind_without_prefix(raw, expected_kind):
+    source = dc.parse_source_line(raw)
+    assert source is not None
+    assert source.kind is expected_kind
