@@ -15,6 +15,7 @@ import os
 import sys
 import re
 import urllib.request
+import urllib.error
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -407,8 +408,12 @@ def download_source(source: Source, args) -> None:
 
 def load_sources_from_url(url: str) -> List[Source]:
     print(f"\nFetching source list from {url} ...")
-    with urllib.request.urlopen(url) as response:
-        data = response.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(url) as response:
+            data = response.read().decode("utf-8")
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        print(f"Failed to fetch source list from {url}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
     sources: List[Source] = []
     for idx, line in enumerate(data.splitlines(), start=1):
         stripped = line.strip()
