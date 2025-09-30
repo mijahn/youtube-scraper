@@ -145,6 +145,12 @@ def parse_source_line(line: str) -> Optional[Source]:
     if not stripped or stripped.startswith("#"):
         return None
 
+    comment_match = re.search(r"\s#", stripped)
+    if comment_match:
+        stripped = stripped[: comment_match.start()].rstrip()
+        if not stripped:
+            return None
+
     prefix_map = {
         "channel": SourceType.CHANNEL,
         "channels": SourceType.CHANNEL,
