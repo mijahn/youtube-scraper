@@ -29,6 +29,9 @@ def make_args(**overrides):
         "max_sleep_interval": None,
         "allow_restricted": False,
         "youtube_client": None,
+        "youtube_fetch_po_token": None,
+        "youtube_po_token": [],
+        "youtube_player_params": None,
         "no_shorts": False,
         "max": None,
     }
@@ -82,6 +85,6 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
     dc.download_source(source, args)
 
     assert len(calls) == 2
-    assert calls[0]["client"] == "web"
-    assert calls[1]["client"] == "android"
+    assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
+    assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
     assert calls[1]["target_video_ids"] == {"retry-id"}

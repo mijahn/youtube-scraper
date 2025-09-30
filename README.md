@@ -81,6 +81,9 @@ The downloader now automatically retries with different YouTube player clients w
 - **Use browser cookies** (`--cookies-from-browser chrome`) so requests look like a real logged-in session.
 - **Slow down the request rate** with the sleep options shown above.
 - **Force the `web` player client** via `--youtube-client web` to avoid the TV client that Google often rate limits.
+- **Leverage yt-dlp's PO Token support** with `--youtube-fetch-po-token always` so the new 2025.9.26 release proactively
+  requests integrity tokens for clients that need them, or pass your own tokens via `--youtube-po-token
+  CLIENT.CONTEXT+TOKEN` when integrating an external provider.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
 
 ## channels.txt format tips
