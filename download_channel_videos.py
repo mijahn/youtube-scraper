@@ -32,6 +32,7 @@ except ImportError:
 class DownloadAttempt:
     downloaded: int
     video_unavailable_errors: int
+    auth_required_errors: int
     other_errors: int
     stopped_due_to_limit: bool = False
 
@@ -39,8 +40,17 @@ class DownloadAttempt:
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
+    AUTH_REQUIRED_KEYWORDS = [
+        "members-only",
+        "sign in to confirm your age",
+        "premium",
+        "http error 403",
+        "po token",
+    ]
+
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
+        self.auth_required_errors = 0
         self.other_errors = 0
 
     def _print(self, message: str, file=sys.stdout) -> None:
@@ -51,6 +61,10 @@ class DownloadLogger:
         if isinstance(message, bytes):
             return message.decode("utf-8", "ignore")
         return str(message)
+
+    @staticmethod
+    def _normalize_message(message: str) -> str:
+        return re.sub(r"\s+", " ", message).strip()
 
     def debug(self, message) -> None:  # yt-dlp calls this
         pass
@@ -63,12 +77,16 @@ class DownloadLogger:
 
     def error(self, message) -> None:
         text = self._ensure_text(message)
-        lowered = text.lower()
+        normalized = self._normalize_message(text)
+        lowered = normalized.lower()
+
         if "video unavailable" in lowered or "content isn't available" in lowered or "content is not available" in lowered:
             self.video_unavailable_errors += 1
+        elif any(keyword in lowered for keyword in self.AUTH_REQUIRED_KEYWORDS):
+            self.auth_required_errors += 1
         else:
             self.other_errors += 1
-        self._print(text, file=sys.stderr)
+        self._print(normalized, file=sys.stderr)
 
 
 class SourceType(Enum):
@@ -300,6 +318,7 @@ def run_download_attempt(urls: List[str], args, player_client: Optional[str], ma
     return DownloadAttempt(
         downloaded=downloaded,
         video_unavailable_errors=logger.video_unavailable_errors,
+        auth_required_errors=logger.auth_required_errors,
         other_errors=logger.other_errors,
         stopped_due_to_limit=stopped_due_to_limit,
     )
@@ -322,24 +341,68 @@ def download_source(source: Source, args) -> None:
     else:
         client_attempts = ["web", "android", "ios", "tv"]
 
+    total_auth_required_errors = 0
+    exhausted_due_to_auth = False
+    result: Optional[DownloadAttempt] = None
+
     for idx, client in enumerate(client_attempts):
         result = run_download_attempt(urls, args, client, max_total)
+        total_auth_required_errors += result.auth_required_errors
+
+        only_auth_required = (
+            result.downloaded == 0
+            and result.other_errors == 0
+            and result.video_unavailable_errors == 0
+            and result.auth_required_errors > 0
+        )
+        only_video_unavailable = (
+            result.downloaded == 0
+            and result.other_errors == 0
+            and result.video_unavailable_errors > 0
+            and result.auth_required_errors == 0
+        )
 
         if result.stopped_due_to_limit:
             break
 
         if args.youtube_client:
+            if only_auth_required:
+                exhausted_due_to_auth = True
             break
 
-        if result.downloaded > 0 or result.other_errors > 0 or result.video_unavailable_errors == 0:
+        if only_auth_required:
+            if idx < len(client_attempts) - 1:
+                next_client = client_attempts[idx + 1]
+                print(
+                    "\nEncountered authentication-restricted content while using the"
+                    f" {client!r} client. Retrying with {next_client!r}..."
+                )
+                continue
+            exhausted_due_to_auth = True
             break
 
-        if idx < len(client_attempts) - 1:
+        if only_video_unavailable and idx < len(client_attempts) - 1:
             next_client = client_attempts[idx + 1]
             print(
                 "\nEncountered only 'Video unavailable' errors using the"
                 f" {client!r} client. Retrying with {next_client!r}..."
             )
+            continue
+
+        break
+
+    if (
+        exhausted_due_to_auth
+        and result
+        and result.downloaded == 0
+        and result.other_errors == 0
+        and total_auth_required_errors > 0
+    ):
+        print(
+            "\nAll client attempts resulted in authentication-restricted errors"
+            f" ({total_auth_required_errors} occurrences). Consider supplying cookies"
+            " with --cookies-from-browser or providing a valid PO token before retrying."
+        )
 
 
 def load_sources_from_url(url: str) -> List[Source]:
