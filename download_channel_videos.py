@@ -196,6 +196,14 @@ def parse_args() -> argparse.Namespace:
         help="Maximum randomized sleep between video downloads",
     )
     parser.add_argument(
+        "--allow-restricted",
+        action="store_true",
+        help=(
+            "Download restricted videos (subscriber-only, Premium, private, etc.)"
+            " when authentication is available"
+        ),
+    )
+    parser.add_argument(
         "--youtube-client",
         choices=["web", "android", "ios", "tv"],
         default=None,
@@ -261,6 +269,52 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
         ydl_opts["sleep_interval"] = args.sleep_interval
     if args.max_sleep_interval:
         ydl_opts["max_sleep_interval"] = args.max_sleep_interval
+    if not args.allow_restricted:
+
+        def restricted_match_filter(info_dict):
+            reasons = []
+
+            availability = info_dict.get("availability")
+            if availability:
+                normalized = str(availability).lower()
+                availability_reasons = {
+                    "needs_auth": "requires authentication",
+                    "subscriber_only": "channel members only",
+                    "premium_only": "YouTube Premium only",
+                    "members_only": "channel members only",
+                    "private": "marked as private",
+                    "login_required": "requires authentication",
+                }
+                reason = availability_reasons.get(normalized)
+                if reason:
+                    reasons.append(reason)
+                elif normalized not in {"public", "unlisted"}:
+                    reasons.append(f"availability is '{availability}'")
+
+            if info_dict.get("is_private"):
+                reasons.append("marked as private")
+            if info_dict.get("requires_subscription"):
+                reasons.append("requires channel subscription")
+            if info_dict.get("subscriber_only"):
+                reasons.append("channel members only")
+            if info_dict.get("premium_only"):
+                reasons.append("YouTube Premium only")
+
+            if reasons:
+                unique_reasons = []
+                seen = set()
+                for reason in reasons:
+                    if reason not in seen:
+                        unique_reasons.append(reason)
+                        seen.add(reason)
+                joined_reasons = "; ".join(unique_reasons)
+                video_id = info_dict.get("id") or "unknown id"
+                return f"{video_id} skipped: {joined_reasons}"
+
+            return None
+
+        ydl_opts["match_filter"] = restricted_match_filter
+
     if player_client:
         ydl_opts.setdefault("extractor_args", {})
         ydl_opts["extractor_args"].setdefault("youtube", {})
