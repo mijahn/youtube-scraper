@@ -136,13 +136,17 @@ class Source:
 
         if self.kind is SourceType.CHANNEL:
             urls: List[str]
-            if re.search(r"/(videos|shorts|streams|live)$", normalized):
+            base_channel_url = normalized
+            trailing_match = re.search(r"/(videos|shorts|streams|live)$", normalized)
+
+            if trailing_match:
                 urls = [normalized]
+                base_channel_url = normalized[: -len(trailing_match.group(0))]
             else:
                 urls = [normalized + "/videos"]
 
             if include_shorts:
-                shorts_url = normalized + "/shorts"
+                shorts_url = base_channel_url + "/shorts"
                 if shorts_url not in urls:
                     urls.append(shorts_url)
             return urls
