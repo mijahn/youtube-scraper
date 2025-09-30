@@ -26,6 +26,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 try:
     import yt_dlp
     from yt_dlp.utils import DownloadError, ExtractorError
+    from yt_dlp.extractor.youtube import YoutubeIE
+    from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
 except ImportError:
     print("yt-dlp is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
@@ -61,6 +63,7 @@ class DownloadLogger:
     RETRYABLE_FRAGMENTS = (
         "http error 403",
         "forbidden",
+        "po token",
     )
 
     IGNORED_FRAGMENTS = (
@@ -176,7 +179,24 @@ class Source:
         return [normalized]
 
 
-DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = ("web", "android", "ios", "tv")
+PLAYER_CLIENT_CHOICES: Tuple[str, ...] = tuple(
+    sorted(client for client in INNERTUBE_CLIENTS if not client.startswith("_"))
+)
+
+
+def _default_player_clients() -> Tuple[str, ...]:
+    defaults = getattr(YoutubeIE, "_DEFAULT_CLIENTS", None)
+    if defaults:
+        return tuple(defaults)
+    # Fallback to a sensible order if yt-dlp changes internals unexpectedly.
+    preferred_order = ("tv", "web_safari", "web", "android", "ios")
+    ordered_defaults = [client for client in preferred_order if client in PLAYER_CLIENT_CHOICES]
+    if ordered_defaults:
+        return tuple(ordered_defaults)
+    return tuple(PLAYER_CLIENT_CHOICES[:3])
+
+
+DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
 
 
 def normalize_url(url: str) -> str:
@@ -341,9 +361,40 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--youtube-client",
-        choices=["web", "android", "ios", "tv"],
+        choices=PLAYER_CLIENT_CHOICES,
         default=None,
-        help="Override the YouTube player client used by yt-dlp (default: yt-dlp decides)",
+        help=(
+            "Override the YouTube player client used by yt-dlp "
+            "(default: yt-dlp's recommended clients)"
+        ),
+    )
+    parser.add_argument(
+        "--youtube-fetch-po-token",
+        choices=["auto", "always", "never"],
+        default=None,
+        help=(
+            "Control how yt-dlp fetches YouTube PO Tokens when required. "
+            "Set to 'always' to proactively request tokens or 'never' to skip. "
+            "(default: yt-dlp decides)."
+        ),
+    )
+    parser.add_argument(
+        "--youtube-po-token",
+        action="append",
+        default=[],
+        metavar="CLIENT.CONTEXT+TOKEN",
+        help=(
+            "Provide a pre-generated PO Token to yt-dlp. May be passed multiple times. "
+            "Useful when tokens are fetched externally."
+        ),
+    )
+    parser.add_argument(
+        "--youtube-player-params",
+        default=None,
+        help=(
+            "Override the Innertube player params used by yt-dlp when requesting streams. "
+            "Advanced option for troubleshooting format availability."
+        ),
     )
     parser.add_argument(
         "--watch-interval",
@@ -476,10 +527,23 @@ def build_ydl_options(
 
         filters.append(restricted_match_filter)
 
+    extractor_args: Dict[str, Dict[str, List[str]]] = {}
+    youtube_extractor_args: Dict[str, List[str]] = {}
+
     if player_client:
-        ydl_opts.setdefault("extractor_args", {})
-        ydl_opts["extractor_args"].setdefault("youtube", {})
-        ydl_opts["extractor_args"]["youtube"]["player_client"] = [player_client]
+        youtube_extractor_args["player_client"] = [player_client]
+    if args.youtube_fetch_po_token:
+        youtube_extractor_args["fetch_pot"] = [args.youtube_fetch_po_token]
+    if args.youtube_po_token:
+        youtube_extractor_args["po_token"] = list(args.youtube_po_token)
+    if args.youtube_player_params:
+        youtube_extractor_args["player_params"] = [args.youtube_player_params]
+
+    if youtube_extractor_args:
+        extractor_args["youtube"] = youtube_extractor_args
+
+    if extractor_args:
+        ydl_opts["extractor_args"] = extractor_args
 
     if additional_filters:
         filters.extend(additional_filters)
@@ -491,6 +555,12 @@ def build_ydl_options(
     debug_parts = [f"format={ydl_opts['format']}"]
     if player_client:
         debug_parts.append(f"player_client={player_client}")
+    if args.youtube_fetch_po_token:
+        debug_parts.append(f"fetch_pot={args.youtube_fetch_po_token}")
+    if args.youtube_po_token:
+        debug_parts.append(f"po_tokens={len(args.youtube_po_token)} provided")
+    if args.youtube_player_params:
+        debug_parts.append("player_params=custom")
     if args.rate_limit:
         debug_parts.append(f"ratelimit={args.rate_limit}")
     if args.concurrency:
