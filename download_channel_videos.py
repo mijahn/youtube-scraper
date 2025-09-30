@@ -64,7 +64,16 @@ class DownloadLogger:
     def error(self, message) -> None:
         text = self._ensure_text(message)
         lowered = text.lower()
-        if "video unavailable" in lowered or "content isn't available" in lowered or "content is not available" in lowered:
+        unavailable_fragments = (
+            "video unavailable",
+            "content isn't available",
+            "content is not available",
+            "channel members",
+            "members-only",
+            "requires purchase",
+            "http error 410",
+        )
+        if any(fragment in lowered for fragment in unavailable_fragments):
             self.video_unavailable_errors += 1
         else:
             self.other_errors += 1
