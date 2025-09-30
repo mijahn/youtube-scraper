@@ -14,8 +14,9 @@ import argparse
 import os
 import sys
 import re
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -163,6 +164,58 @@ def normalize_url(url: str) -> str:
     return cleaned.rstrip("/")
 
 
+def infer_source_kind(url: str) -> SourceType:
+    """Best-effort inference for the source type based on the URL structure."""
+
+    try:
+        normalized = normalize_url(url)
+    except ValueError:
+        # Invalid/empty URLs will be handled later by callers.
+        return SourceType.CHANNEL
+
+    parsed = urllib.parse.urlparse(normalized)
+    host = parsed.netloc.lower()
+    path = parsed.path or ""
+    query = urllib.parse.parse_qs(parsed.query)
+
+    if host.endswith("youtu.be"):
+        return SourceType.VIDEO
+
+    if query.get("list"):
+        return SourceType.PLAYLIST
+
+    lowered_path = path.lower()
+
+    playlist_indicators = (
+        "/playlist",
+        "/playlists",
+        "/watchlist",
+    )
+    if any(indicator in lowered_path for indicator in playlist_indicators):
+        return SourceType.PLAYLIST
+
+    video_prefixes = (
+        "/watch",
+        "/shorts/",
+        "/live/",
+        "/clip/",
+        "/v/",
+    )
+    if any(lowered_path.startswith(prefix) for prefix in video_prefixes):
+        return SourceType.VIDEO
+
+    channel_prefixes = (
+        "/@",
+        "/channel/",
+        "/c/",
+        "/user/",
+    )
+    if any(lowered_path.startswith(prefix) for prefix in channel_prefixes):
+        return SourceType.CHANNEL
+
+    return SourceType.CHANNEL
+
+
 def parse_source_line(line: str) -> Optional[Source]:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -193,8 +246,8 @@ def parse_source_line(line: str) -> Optional[Source]:
                 raise ValueError("missing URL after prefix")
             return Source(prefix_map[kind_key], url)
 
-    # Default to channel when no known prefix is supplied.
-    return Source(SourceType.CHANNEL, stripped)
+    inferred_kind = infer_source_kind(stripped)
+    return Source(inferred_kind, stripped)
 
 
 def parse_args() -> argparse.Namespace:
@@ -409,6 +462,39 @@ def build_ydl_options(
     if combined_filter:
         ydl_opts["match_filter"] = combined_filter
 
+    debug_parts = [f"format={ydl_opts['format']}"]
+    if player_client:
+        debug_parts.append(f"player_client={player_client}")
+    if args.rate_limit:
+        debug_parts.append(f"ratelimit={args.rate_limit}")
+    if args.concurrency:
+        debug_parts.append(f"concurrency={args.concurrency}")
+    if args.sleep_requests:
+        debug_parts.append(f"sleep_requests={args.sleep_requests}")
+    if args.sleep_interval:
+        debug_parts.append(f"sleep_interval={args.sleep_interval}")
+    if args.max_sleep_interval:
+        debug_parts.append(f"max_sleep_interval={args.max_sleep_interval}")
+    if args.since or args.until:
+        debug_parts.append(
+            "date_range="
+            + ":".join(
+                filter(
+                    None,
+                    [
+                        f"since={ydl_opts.get('dateafter')}" if args.since else None,
+                        f"until={ydl_opts.get('datebefore')}" if args.until else None,
+                    ],
+                )
+            )
+        )
+
+    print(
+        "Constructed yt-dlp options: "
+        + ", ".join(debug_parts)
+        + f", write_subtitles={not args.skip_subtitles}, write_thumbnails={not args.skip_thumbs}"
+    )
+
     return ydl_opts
 
 
@@ -502,6 +588,12 @@ def run_download_attempt(
         if active_url:
             parts.append(f"url={active_url}")
         return f"[{' '.join(parts)}] "
+
+    print(
+        "Starting download attempt with "
+        f"client={client_label}, max_total={'no-limit' if max_total is None else max_total}, "
+        f"urls={urls}"
+    )
 
     def hook(d):
         nonlocal downloaded, stopped_due_to_limit
@@ -658,6 +750,11 @@ def download_source(source: Source, args) -> None:
         return
 
     print(f"\n=== Starting downloads for {source.kind.value}: {display_url} ===")
+    print(
+        "Resolved download URLs: "
+        + ", ".join(urls)
+        + (" (shorts excluded)" if args.no_shorts else "")
+    )
     max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
 
     client_attempts: List[Optional[str]]
@@ -745,6 +842,7 @@ def load_sources_from_url(url: str) -> List[Source]:
             raise SystemExit(f"Failed to parse line {idx} from {url}: {exc}")
         if parsed:
             sources.append(parsed)
+    print(f"Loaded {len(sources)} sources from remote list")
     return sources
 
 
@@ -763,6 +861,7 @@ def load_sources_from_file(path: str) -> Tuple[List[Source], List[str]]:
             if parsed:
                 sources.append(parsed)
                 raw_lines.append(stripped)
+    print(f"Loaded {len(sources)} sources from {path}")
     return sources, raw_lines
 
 
