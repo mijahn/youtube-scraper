@@ -54,6 +54,7 @@ python3 download_channel_videos.py \
   --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
   --output "/Volumes/Micha 4TB/youtube downloads" \
   --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --youtube-fetch-po-token always \
   --cookies-from-browser chrome \
   --youtube-client web \
   --sleep-requests 1.5 \
