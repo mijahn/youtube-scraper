@@ -33,7 +33,9 @@ def make_args(**overrides):
         "youtube_player_params": None,
     }
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    args = SimpleNamespace(**defaults)
+    dc.apply_authentication_defaults(args, environ={})
+    return args
 
 
 def test_build_ydl_options_combines_filters(tmp_path):
@@ -94,9 +96,14 @@ def test_build_ydl_options_includes_youtube_specific_args(tmp_path):
     youtube_args = extractor_args.get("youtube")
     assert youtube_args is not None
     assert youtube_args["player_client"] == ["web_safari"]
-    assert youtube_args["fetch_pot"] == ["always"]
+    assert youtube_args["fetch_po_token"] == ["always"]
     assert youtube_args["po_token"] == ["web.gvs+TOKEN"]
     assert youtube_args["player_params"] == ["8AEB"]
+    provider_args = extractor_args.get("youtubepot-bgutilhttp")
+    assert provider_args is not None
+    assert provider_args.get("base_url") == [dc.DEFAULT_BGUTIL_HTTP_BASE_URL]
+    assert "disable_innertube" not in provider_args
+    assert getattr(args, "bgutil_provider_candidates") == ["http"]
 
 @pytest.mark.parametrize(
     "message, expected",

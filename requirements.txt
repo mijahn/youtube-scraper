@@ -1,1 +1,2 @@
 yt-dlp>=2025.9.26,<2026.0.0
+bgutil-ytdlp-pot-provider>=1.2.2
