@@ -24,6 +24,7 @@ from typing import List, Optional, Set, Tuple
 
 try:
     import yt_dlp
+    from yt_dlp.utils import DownloadError as YtDlpDownloadError
 except ImportError:
     print("yt-dlp is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
@@ -35,6 +36,7 @@ class DownloadAttempt:
     video_unavailable_errors: int
     other_errors: int
     stopped_due_to_limit: bool = False
+    retryable_errors: Optional[Set[str]] = None
 
 
 class DownloadLogger:
@@ -43,6 +45,8 @@ class DownloadLogger:
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
+        self.retryable_errors: Set[str] = set()
+        self.last_error: Optional[str] = None
 
     def _print(self, message: str, file=sys.stdout) -> None:
         print(message, file=file)
@@ -78,6 +82,20 @@ class DownloadLogger:
             self.video_unavailable_errors += 1
         else:
             self.other_errors += 1
+
+        http_error_match = re.search(r"http error (\d+)", lowered)
+        if http_error_match:
+            self.retryable_errors.add(f"http_{http_error_match.group(1)}")
+
+        throttling_fragments = (
+            "sign in to confirm you're not a bot",
+            "please try again later",
+            "this request has been blocked",
+        )
+        if any(fragment in lowered for fragment in throttling_fragments):
+            self.retryable_errors.add("throttled")
+
+        self.last_error = text
         self._print(text, file=sys.stderr)
 
 
@@ -380,7 +398,12 @@ def run_download_attempt(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
                 print(f"\n=== Processing: {u} ===")
-                ydl.download([u])
+                try:
+                    ydl.download([u])
+                except YtDlpDownloadError as exc:
+                    message = str(exc)
+                    if logger.last_error != message:
+                        logger.error(message)
                 if stopped_due_to_limit:
                     break
     except KeyboardInterrupt:
@@ -389,11 +412,14 @@ def run_download_attempt(
         else:
             raise
 
+    retryable_errors = logger.retryable_errors if logger.retryable_errors else None
+
     return DownloadAttempt(
         downloaded=downloaded,
         video_unavailable_errors=logger.video_unavailable_errors,
         other_errors=logger.other_errors,
         stopped_due_to_limit=stopped_due_to_limit,
+        retryable_errors=retryable_errors,
     )
 
 
@@ -425,19 +451,39 @@ def download_source(source: Source, args) -> None:
         if args.youtube_client:
             break
 
-        should_retry = (
-            result.other_errors == 0
-            and result.video_unavailable_errors > 0
-            and idx < len(client_attempts) - 1
-        )
+        retryable_errors = result.retryable_errors or set()
+        should_retry = False
+        http_errors: Set[str] = set()
+        throttled = False
+
+        if idx < len(client_attempts) - 1:
+            if result.other_errors == 0 and result.video_unavailable_errors > 0:
+                should_retry = True
+            else:
+                http_errors = {err for err in retryable_errors if err.startswith("http_")}
+                retryable_status = {"http_401", "http_403", "http_429"}
+                throttled = "throttled" in retryable_errors
+                only_failed = result.downloaded == 0 and (http_errors or throttled)
+
+                if only_failed and (http_errors & retryable_status or throttled):
+                    should_retry = True
 
         if not should_retry:
             break
 
         next_client = client_attempts[idx + 1]
+        if result.other_errors == 0 and result.video_unavailable_errors > 0:
+            reason = "Encountered only 'Video unavailable' errors"
+        elif throttled:
+            reason = "Requests appear to be throttled or blocked"
+        elif http_errors:
+            codes = sorted(err.split("_", 1)[1] for err in http_errors)
+            reason = f"Encountered HTTP errors ({', '.join(codes)})"
+        else:
+            reason = "Retrying with a different client due to previous failures"
+
         print(
-            "\nEncountered only 'Video unavailable' errors using the"
-            f" {client!r} client. Retrying with {next_client!r}..."
+            f"\n{reason} using the {client!r} client. Retrying with {next_client!r}..."
         )
 
 
