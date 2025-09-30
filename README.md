@@ -87,6 +87,22 @@ The downloader now automatically retries with different YouTube player clients w
   CLIENT.CONTEXT+TOKEN` when integrating an external provider.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
 
+### Automatic authentication defaults
+
+If you routinely run the script with the same authentication details you can configure them once via environment
+variables:
+
+| Environment variable | Purpose |
+| --- | --- |
+| `YOUTUBE_SCRAPER_COOKIES_FROM_BROWSER` | Browser profile to pull cookies from (e.g. `chrome`, `firefox`). |
+| `YOUTUBE_SCRAPER_PO_TOKENS` | Comma or newline separated list of PO tokens in `CLIENT.CONTEXT+TOKEN` format. |
+| `YOUTUBE_SCRAPER_FETCH_PO_TOKEN` | Overrides yt-dlp's PO token fetch behavior (`auto`, `always`, or `never`). |
+
+When these variables are present the script automatically applies them to every invocation, so the required PO token and
+cookies are always provided even if you omit the corresponding command-line options. By default the downloader now also
+requests PO tokens proactively (`--youtube-fetch-po-token always`) to avoid integrity challenges on the first client
+attempt.
+
 ## channels.txt format tips
 
 - Lines beginning with `#` are ignored, which lets you organize related sources into sections.

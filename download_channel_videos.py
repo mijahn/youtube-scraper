@@ -64,6 +64,7 @@ class DownloadLogger:
         "http error 403",
         "forbidden",
         "po token",
+        "login required",
     )
 
     IGNORED_FRAGMENTS = (
@@ -182,6 +183,12 @@ class Source:
 PLAYER_CLIENT_CHOICES: Tuple[str, ...] = tuple(
     sorted(client for client in INNERTUBE_CLIENTS if not client.startswith("_"))
 )
+
+
+ENV_COOKIES_FROM_BROWSER = "YOUTUBE_SCRAPER_COOKIES_FROM_BROWSER"
+ENV_PO_TOKENS = "YOUTUBE_SCRAPER_PO_TOKENS"
+ENV_FETCH_PO_TOKEN = "YOUTUBE_SCRAPER_FETCH_PO_TOKEN"
+DEFAULT_FETCH_PO_TOKEN_BEHAVIOR = "always"
 
 
 def _default_player_clients() -> Tuple[str, ...]:
@@ -403,6 +410,52 @@ def parse_args() -> argparse.Namespace:
         help="When using --channels-file, seconds between checks for updates (default: 300)",
     )
     return parser.parse_args()
+
+
+def _parse_po_token_env(value: str) -> List[str]:
+    tokens: List[str] = []
+    for part in re.split(r"[\n,]+", value):
+        cleaned = part.strip()
+        if cleaned:
+            tokens.append(cleaned)
+    return tokens
+
+
+def apply_authentication_defaults(args, environ: Optional[Dict[str, str]] = None) -> None:
+    """Populate authentication-related args from the environment when missing."""
+
+    if environ is None:
+        environ = os.environ
+
+    if not getattr(args, "cookies_from_browser", None):
+        env_cookie = environ.get(ENV_COOKIES_FROM_BROWSER, "").strip()
+        if env_cookie:
+            args.cookies_from_browser = env_cookie
+
+    env_tokens_raw = environ.get(ENV_PO_TOKENS)
+    parsed_tokens = _parse_po_token_env(env_tokens_raw) if env_tokens_raw else []
+
+    existing_tokens = list(getattr(args, "youtube_po_token", []) or [])
+    if parsed_tokens:
+        merged_tokens = existing_tokens + parsed_tokens
+        seen: Set[str] = set()
+        unique_tokens: List[str] = []
+        for token in merged_tokens:
+            if token not in seen:
+                seen.add(token)
+                unique_tokens.append(token)
+        args.youtube_po_token = unique_tokens
+    elif not existing_tokens:
+        args.youtube_po_token = existing_tokens
+
+    fetch_choice = getattr(args, "youtube_fetch_po_token", None)
+    if not fetch_choice:
+        env_fetch = environ.get(ENV_FETCH_PO_TOKEN, "").strip().lower()
+        if env_fetch in {"auto", "always", "never"}:
+            fetch_choice = env_fetch
+        else:
+            fetch_choice = DEFAULT_FETCH_PO_TOKEN_BEHAVIOR
+        args.youtube_fetch_po_token = fetch_choice
 
 
 def ytdlp_date(s: str) -> str:
@@ -907,11 +960,11 @@ def download_source(source: Source, args) -> None:
             pending_retry_ids = None
             break
 
+        next_client_available = idx < len(client_attempts) - 1
+
         if args.youtube_client:
             pending_retry_ids = None
             break
-
-        next_client_available = idx < len(client_attempts) - 1
 
         if result.retryable_error_ids:
             if next_client_available:
@@ -929,6 +982,14 @@ def download_source(source: Source, args) -> None:
             break
 
         pending_retry_ids = None
+
+        if next_client_available and result.downloaded == 0 and result.other_errors > 0:
+            next_client = client_attempts[idx + 1]
+            print(
+                "\nEncountered download errors using the"
+                f" {client!r} client. Trying {next_client!r} next..."
+            )
+            continue
 
         should_retry_unavailable = (
             result.other_errors == 0
@@ -1054,6 +1115,7 @@ def watch_channels_file(path: str, args) -> None:
 
 def main() -> int:
     args = parse_args()
+    apply_authentication_defaults(args)
 
     if not args.url and not args.channels_file and not args.channels_url:
         print("Error: You must provide either --url, --channels-file, or --channels-url", file=sys.stderr)
