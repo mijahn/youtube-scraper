@@ -27,7 +27,10 @@ try:
     import yt_dlp
     from yt_dlp.utils import DownloadError, ExtractorError
     from yt_dlp.extractor.youtube import YoutubeIE
-    from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    except ModuleNotFoundError:  # Older yt-dlp releases expose the constant directly.
+        from yt_dlp.extractor.youtube import INNERTUBE_CLIENTS
 except ImportError:
     print("yt-dlp is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
@@ -185,10 +188,24 @@ PLAYER_CLIENT_CHOICES: Tuple[str, ...] = tuple(
 )
 
 
+class BgUtilProviderMode(Enum):
+    AUTO = "auto"
+    HTTP = "http"
+    SCRIPT = "script"
+    DISABLED = "disabled"
+
+
 ENV_COOKIES_FROM_BROWSER = "YOUTUBE_SCRAPER_COOKIES_FROM_BROWSER"
 ENV_PO_TOKENS = "YOUTUBE_SCRAPER_PO_TOKENS"
 ENV_FETCH_PO_TOKEN = "YOUTUBE_SCRAPER_FETCH_PO_TOKEN"
+ENV_BGUTIL_PROVIDER_MODE = "YOUTUBE_SCRAPER_BGUTIL_PROVIDER"
+ENV_BGUTIL_HTTP_BASE_URL = "YOUTUBE_SCRAPER_BGUTIL_HTTP_BASE_URL"
+ENV_BGUTIL_HTTP_DISABLE_INNERTUBE = "YOUTUBE_SCRAPER_BGUTIL_HTTP_DISABLE_INNERTUBE"
+ENV_BGUTIL_SCRIPT_PATH = "YOUTUBE_SCRAPER_BGUTIL_SCRIPT_PATH"
 DEFAULT_FETCH_PO_TOKEN_BEHAVIOR = "always"
+DEFAULT_BGUTIL_PROVIDER_MODE = BgUtilProviderMode.AUTO.value
+DEFAULT_BGUTIL_HTTP_BASE_URL = "http://127.0.0.1:4416"
+BGUTIL_PROVIDER_CHOICES: Tuple[str, ...] = tuple(mode.value for mode in BgUtilProviderMode)
 
 
 def _default_player_clients() -> Tuple[str, ...]:
@@ -404,6 +421,45 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--bgutil-provider",
+        choices=BGUTIL_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "Control how BGUtil PO Token providers are used. "
+            "'auto' tries the local HTTP server first, 'http' forces the HTTP provider, "
+            "'script' forces the Node.js script provider, and 'disabled' turns the integration off."
+        ),
+    )
+    parser.add_argument(
+        "--bgutil-http-base-url",
+        default=None,
+        help=(
+            "Override the base URL for the BGUtil HTTP provider. "
+            "Defaults to http://127.0.0.1:4416."
+        ),
+    )
+    parser.add_argument(
+        "--bgutil-http-disable-innertube",
+        dest="bgutil_http_disable_innertube",
+        action="store_true",
+        help="Disable Innertube attestation when requesting PO tokens from the BGUtil HTTP provider.",
+    )
+    parser.add_argument(
+        "--bgutil-http-enable-innertube",
+        dest="bgutil_http_disable_innertube",
+        action="store_false",
+        help="Explicitly allow Innertube attestation when requesting PO tokens via the BGUtil HTTP provider.",
+    )
+    parser.set_defaults(bgutil_http_disable_innertube=None)
+    parser.add_argument(
+        "--bgutil-script-path",
+        default=None,
+        help=(
+            "Path to the BGUtil generate_once.js script when using the script provider. "
+            "Only used when the script provider is enabled."
+        ),
+    )
+    parser.add_argument(
         "--watch-interval",
         type=float,
         default=300.0,
@@ -419,6 +475,87 @@ def _parse_po_token_env(value: str) -> List[str]:
         if cleaned:
             tokens.append(cleaned)
     return tokens
+
+
+def _normalize_env_str(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _env_flag(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _apply_bgutil_provider_defaults(args, environ: Optional[Dict[str, str]]) -> None:
+    if environ is None:
+        environ = os.environ
+
+    provider_value = getattr(args, "bgutil_provider", None)
+    valid_modes = set(BGUTIL_PROVIDER_CHOICES)
+    if provider_value is None:
+        provider_env = _normalize_env_str(environ.get(ENV_BGUTIL_PROVIDER_MODE))
+        if provider_env and provider_env in valid_modes:
+            provider_mode = BgUtilProviderMode(provider_env)
+        else:
+            provider_mode = BgUtilProviderMode.AUTO
+    else:
+        provider_str = str(provider_value).strip().lower()
+        if provider_str in valid_modes:
+            provider_mode = BgUtilProviderMode(provider_str)
+        else:
+            provider_mode = BgUtilProviderMode.AUTO
+    setattr(args, "bgutil_provider", provider_mode.value)
+
+    base_url_value = getattr(args, "bgutil_http_base_url", None)
+    if base_url_value is None:
+        base_url_env = _normalize_env_str(environ.get(ENV_BGUTIL_HTTP_BASE_URL))
+        base_url = base_url_env or DEFAULT_BGUTIL_HTTP_BASE_URL
+    else:
+        base_url_str = str(base_url_value).strip()
+        base_url = base_url_str or DEFAULT_BGUTIL_HTTP_BASE_URL
+    setattr(args, "bgutil_http_base_url", base_url)
+
+    disable_innertube_value = getattr(args, "bgutil_http_disable_innertube", None)
+    if disable_innertube_value is None:
+        disable_flag = _env_flag(environ.get(ENV_BGUTIL_HTTP_DISABLE_INNERTUBE))
+    else:
+        disable_flag = bool(disable_innertube_value)
+    setattr(args, "bgutil_http_disable_innertube", disable_flag)
+
+    script_path_value = getattr(args, "bgutil_script_path", None)
+    if script_path_value is None:
+        script_env = _normalize_env_str(environ.get(ENV_BGUTIL_SCRIPT_PATH))
+        script_path = os.path.expanduser(script_env) if script_env else None
+    else:
+        script_path = os.path.expanduser(str(script_path_value)) if script_path_value else None
+    setattr(args, "bgutil_script_path", script_path)
+
+    provider_candidates: List[str] = []
+    if provider_mode == BgUtilProviderMode.AUTO:
+        provider_candidates.append("http")
+        if script_path and os.path.isfile(script_path):
+            provider_candidates.append("script")
+    elif provider_mode == BgUtilProviderMode.HTTP:
+        provider_candidates.append("http")
+    elif provider_mode == BgUtilProviderMode.SCRIPT:
+        if script_path and os.path.isfile(script_path):
+            provider_candidates.append("script")
+        else:
+            warning = "Configured BGUtil script provider path not found; disabling PO Token script provider."
+            if script_path:
+                warning += f" Missing file: {script_path}"
+            print(warning, file=sys.stderr)
+    else:  # DISABLED
+        provider_candidates = []
+
+    setattr(args, "bgutil_provider_candidates", provider_candidates)
+    resolved = provider_candidates[0] if provider_candidates else "disabled"
+    setattr(args, "bgutil_provider_resolved", resolved)
 
 
 def apply_authentication_defaults(args, environ: Optional[Dict[str, str]] = None) -> None:
@@ -456,6 +593,8 @@ def apply_authentication_defaults(args, environ: Optional[Dict[str, str]] = None
         else:
             fetch_choice = DEFAULT_FETCH_PO_TOKEN_BEHAVIOR
         args.youtube_fetch_po_token = fetch_choice
+
+    _apply_bgutil_provider_defaults(args, environ)
 
 
 def ytdlp_date(s: str) -> str:
@@ -586,7 +725,7 @@ def build_ydl_options(
     if player_client:
         youtube_extractor_args["player_client"] = [player_client]
     if args.youtube_fetch_po_token:
-        youtube_extractor_args["fetch_pot"] = [args.youtube_fetch_po_token]
+        youtube_extractor_args["fetch_po_token"] = [args.youtube_fetch_po_token]
     if args.youtube_po_token:
         youtube_extractor_args["po_token"] = list(args.youtube_po_token)
     if args.youtube_player_params:
@@ -594,6 +733,23 @@ def build_ydl_options(
 
     if youtube_extractor_args:
         extractor_args["youtube"] = youtube_extractor_args
+
+    provider_candidates = list(getattr(args, "bgutil_provider_candidates", []))
+    if provider_candidates:
+        if "http" in provider_candidates:
+            http_args: Dict[str, List[str]] = {}
+            base_url = getattr(args, "bgutil_http_base_url", None)
+            if base_url:
+                http_args["base_url"] = [base_url]
+            if getattr(args, "bgutil_http_disable_innertube", False):
+                http_args["disable_innertube"] = ["1"]
+            extractor_args["youtubepot-bgutilhttp"] = http_args
+        if "script" in provider_candidates:
+            script_args: Dict[str, List[str]] = {}
+            script_path = getattr(args, "bgutil_script_path", None)
+            if script_path:
+                script_args["script_path"] = [script_path]
+            extractor_args["youtubepot-bgutilscript"] = script_args
 
     if extractor_args:
         ydl_opts["extractor_args"] = extractor_args
@@ -609,11 +765,21 @@ def build_ydl_options(
     if player_client:
         debug_parts.append(f"player_client={player_client}")
     if args.youtube_fetch_po_token:
-        debug_parts.append(f"fetch_pot={args.youtube_fetch_po_token}")
+        debug_parts.append(f"fetch_po_token={args.youtube_fetch_po_token}")
     if args.youtube_po_token:
         debug_parts.append(f"po_tokens={len(args.youtube_po_token)} provided")
     if args.youtube_player_params:
         debug_parts.append("player_params=custom")
+    if provider_candidates:
+        debug_parts.append("bgutil_providers=" + "+".join(provider_candidates))
+        if getattr(args, "bgutil_http_base_url", None):
+            debug_parts.append(f"bgutil_http={getattr(args, 'bgutil_http_base_url')}")
+        if getattr(args, "bgutil_http_disable_innertube", False):
+            debug_parts.append("bgutil_http_disable_innertube=1")
+        if "script" in provider_candidates:
+            debug_parts.append("bgutil_script=enabled")
+    else:
+        debug_parts.append("bgutil_providers=disabled")
     if args.rate_limit:
         debug_parts.append(f"ratelimit={args.rate_limit}")
     if args.concurrency:
@@ -924,7 +1090,9 @@ def download_source(source: Source, args) -> None:
 
     client_attempts: List[Optional[str]]
     if args.youtube_client:
-        client_attempts = [args.youtube_client]
+        preferred = args.youtube_client
+        remaining = [client for client in DEFAULT_PLAYER_CLIENTS if client != preferred]
+        client_attempts = [preferred] + remaining
     else:
         client_attempts = list(DEFAULT_PLAYER_CLIENTS)
 
@@ -962,10 +1130,6 @@ def download_source(source: Source, args) -> None:
 
         next_client_available = idx < len(client_attempts) - 1
 
-        if args.youtube_client:
-            pending_retry_ids = None
-            break
-
         if result.retryable_error_ids:
             if next_client_available:
                 pending_retry_ids = set(result.retryable_error_ids)
@@ -979,32 +1143,47 @@ def download_source(source: Source, args) -> None:
                 )
                 continue
             pending_retry_ids = None
+            print(
+                "\nEncountered retryable HTTP 403 errors but no additional"
+                f" clients are available after the {client!r} client."
+            )
+            break
+
+        if not next_client_available:
+            pending_retry_ids = None
             break
 
         pending_retry_ids = None
 
-        if next_client_available and result.downloaded == 0 and result.other_errors > 0:
+        if result.other_errors > 0:
             next_client = client_attempts[idx + 1]
+            plural = "error" if result.other_errors == 1 else "errors"
             print(
-                "\nEncountered download errors using the"
+                "\nEncountered"
+                f" {result.other_errors} download {plural} using the"
                 f" {client!r} client. Trying {next_client!r} next..."
             )
             continue
 
-        should_retry_unavailable = (
-            result.other_errors == 0
-            and result.video_unavailable_errors > 0
-            and next_client_available
-        )
+        if result.video_unavailable_errors > 0:
+            next_client = client_attempts[idx + 1]
+            plural = "error" if result.video_unavailable_errors == 1 else "errors"
+            print(
+                "\nEncountered"
+                f" {result.video_unavailable_errors} 'Video unavailable' {plural} using the"
+                f" {client!r} client. Retrying with {next_client!r}..."
+            )
+            continue
 
-        if not should_retry_unavailable:
-            break
+        if result.downloaded == 0:
+            next_client = client_attempts[idx + 1]
+            print(
+                "\nNo videos were downloaded using the"
+                f" {client!r} client. Trying {next_client!r} next..."
+            )
+            continue
 
-        next_client = client_attempts[idx + 1]
-        print(
-            "\nEncountered only 'Video unavailable' errors using the"
-            f" {client!r} client. Retrying with {next_client!r}..."
-        )
+        break
 
     if (
         not args.allow_restricted

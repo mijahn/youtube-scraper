@@ -106,12 +106,101 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
         downloaded_ids,
         target_video_ids=None,
     ):
-        calls.append({"client": client, "urls": tuple(urls)})
+        calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
+        if len(calls) == 1:
+            downloaded_ids.add("first-id")
+            return dc.DownloadAttempt(
+                downloaded=1,
+                video_unavailable_errors=0,
+                other_errors=2,
+                retryable_error_ids=set(),
+                stopped_due_to_limit=False,
+            )
+        assert "first-id" in downloaded_ids
+        return dc.DownloadAttempt(
+            downloaded=0,
+            video_unavailable_errors=0,
+            other_errors=0,
+            retryable_error_ids=set(),
+            stopped_due_to_limit=False,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    assert len(calls) == 2
+    assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
+    assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
+    assert calls[0]["seen"] == set()
+    assert calls[1]["seen"] == {"first-id"}
+
+
+def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    args = make_args()
+
+    calls = []
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+    ):
+        calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
+        if len(calls) == 1:
+            downloaded_ids.add("first-id")
+            return dc.DownloadAttempt(
+                downloaded=1,
+                video_unavailable_errors=2,
+                other_errors=0,
+                retryable_error_ids=set(),
+                stopped_due_to_limit=False,
+            )
+        assert "first-id" in downloaded_ids
+        return dc.DownloadAttempt(
+            downloaded=0,
+            video_unavailable_errors=0,
+            other_errors=0,
+            retryable_error_ids=set(),
+            stopped_due_to_limit=False,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    assert len(calls) == 2
+    assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
+    assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
+    assert calls[0]["seen"] == set()
+    assert calls[1]["seen"] == {"first-id"}
+
+
+def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    primary = dc.DEFAULT_PLAYER_CLIENTS[-1]
+    args = make_args(youtube_client=primary)
+
+    calls = []
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+    ):
+        calls.append(client)
         if len(calls) == 1:
             return dc.DownloadAttempt(
                 downloaded=0,
                 video_unavailable_errors=0,
-                other_errors=2,
+                other_errors=1,
                 retryable_error_ids=set(),
                 stopped_due_to_limit=False,
             )
@@ -127,6 +216,7 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
 
     dc.download_source(source, args)
 
-    assert len(calls) == 2
-    assert calls[0]["client"] == dc.DEFAULT_PLAYER_CLIENTS[0]
-    assert calls[1]["client"] == dc.DEFAULT_PLAYER_CLIENTS[1]
+    fallback_order = [client for client in dc.DEFAULT_PLAYER_CLIENTS if client != primary]
+    assert len(calls) >= 2
+    assert calls[0] == primary
+    assert calls[1] == fallback_order[0]
