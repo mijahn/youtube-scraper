@@ -16,6 +16,7 @@ import sys
 import re
 import urllib.request
 import time
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -322,24 +323,57 @@ def download_source(source: Source, args) -> None:
     else:
         client_attempts = ["web", "android", "ios", "tv"]
 
-    for idx, client in enumerate(client_attempts):
-        result = run_download_attempt(urls, args, client, max_total)
+    temp_archive_path: Optional[str] = None
+    archive_path = args.archive
+    should_prepare_temp_archive = (
+        archive_path is None and not args.youtube_client and len(client_attempts) > 1
+    )
 
-        if result.stopped_due_to_limit:
-            break
+    if should_prepare_temp_archive:
+        tmp = tempfile.NamedTemporaryFile(prefix="yt-scraper-archive-", suffix=".txt", delete=False)
+        temp_archive_path = tmp.name
+        tmp.close()
+        archive_path = temp_archive_path
 
-        if args.youtube_client:
-            break
+    if archive_path is not None and archive_path != args.archive:
+        attempt_args = argparse.Namespace(**vars(args))
+        attempt_args.archive = archive_path
+    else:
+        attempt_args = args
 
-        if result.downloaded > 0 or result.other_errors > 0 or result.video_unavailable_errors == 0:
-            break
+    try:
+        for idx, client in enumerate(client_attempts):
+            result = run_download_attempt(urls, attempt_args, client, max_total)
 
-        if idx < len(client_attempts) - 1:
-            next_client = client_attempts[idx + 1]
-            print(
-                "\nEncountered only 'Video unavailable' errors using the"
-                f" {client!r} client. Retrying with {next_client!r}..."
+            if result.stopped_due_to_limit:
+                break
+
+            if args.youtube_client:
+                break
+
+            non_retryable_errors = result.other_errors > 0
+            can_retry_with_next_client = (
+                not args.youtube_client
+                and idx < len(client_attempts) - 1
+                and result.video_unavailable_errors > 0
+                and not non_retryable_errors
             )
+
+            if can_retry_with_next_client:
+                next_client = client_attempts[idx + 1]
+                print(
+                    "\nEncountered only 'Video unavailable' errors using the",
+                    f" {client!r} client. Retrying with {next_client!r}...",
+                )
+                continue
+
+            break
+    finally:
+        if temp_archive_path:
+            try:
+                os.remove(temp_archive_path)
+            except OSError:
+                pass
 
 
 def load_sources_from_url(url: str) -> List[Source]:
