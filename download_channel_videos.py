@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     import yt_dlp
@@ -63,9 +63,25 @@ class DownloadLogger:
     def __init__(self) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
+        self.current_url: Optional[str] = None
+        self.current_client: Optional[str] = None
+
+    def set_context(self, url: Optional[str], client: Optional[str]) -> None:
+        self.current_url = url
+        self.current_client = client
+
+    def _format_with_context(self, message: str) -> str:
+        context_parts = []
+        if self.current_client:
+            context_parts.append(f"client={self.current_client}")
+        if self.current_url:
+            context_parts.append(f"url={self.current_url}")
+        if context_parts:
+            return f"[{' '.join(context_parts)}] {message}"
+        return message
 
     def _print(self, message: str, file=sys.stdout) -> None:
-        print(message, file=file)
+        print(self._format_with_context(message), file=file)
 
     def _handle_message(self, text: str) -> None:
         lowered = text.lower()
@@ -412,15 +428,131 @@ def run_download_attempt(
     else:
         seen_ids = set()
 
+    client_label = player_client if player_client else "default"
+    active_url: Optional[str] = None
+    format_logged_ids: Set[str] = set()
+    format_descriptions: Dict[str, str] = {}
+    video_labels: Dict[str, str] = {}
+
+    def describe_format_entry(entry: Optional[dict]) -> str:
+        if not isinstance(entry, dict):
+            return "unknown format"
+
+        parts: List[str] = []
+        format_id = entry.get("format_id")
+        if format_id:
+            parts.append(str(format_id))
+
+        width = entry.get("width")
+        height = entry.get("height")
+        if width and height:
+            parts.append(f"{width}x{height}")
+        elif height:
+            parts.append(f"{height}p")
+
+        fps = entry.get("fps")
+        if fps:
+            parts.append(f"{fps}fps")
+
+        vcodec = entry.get("vcodec")
+        if vcodec and vcodec != "none":
+            parts.append(vcodec)
+
+        acodec = entry.get("acodec")
+        if acodec and acodec != "none":
+            parts.append(acodec)
+
+        abr = entry.get("abr")
+        if abr:
+            parts.append(f"{abr}k")
+
+        ext = entry.get("ext")
+        if ext:
+            parts.append(ext)
+
+        if not parts:
+            return "unknown format"
+        return " ".join(str(p) for p in parts if p)
+
+    def describe_formats(info: Optional[dict], payload: dict) -> str:
+        info_dict = info if isinstance(info, dict) else {}
+        requested = info_dict.get("requested_formats")
+        if isinstance(requested, list) and requested:
+            return " + ".join(describe_format_entry(fmt) for fmt in requested)
+
+        if info_dict:
+            return describe_format_entry(info_dict)
+        return describe_format_entry(payload)
+
+    def describe_video(info: Optional[dict]) -> str:
+        if not isinstance(info, dict):
+            return "unknown video"
+        video_id = info.get("id")
+        title = info.get("title")
+        if video_id and title:
+            return f"{title} ({video_id})"
+        if title:
+            return str(title)
+        if video_id:
+            return str(video_id)
+        return "unknown video"
+
+    def context_prefix() -> str:
+        parts = [f"client={client_label}"]
+        if active_url:
+            parts.append(f"url={active_url}")
+        return f"[{' '.join(parts)}] "
+
     def hook(d):
         nonlocal downloaded, stopped_due_to_limit
-        if d.get("status") == "finished":
+        status = d.get("status")
+        info = d.get("info_dict")
+        video_id = info.get("id") if isinstance(info, dict) else None
+
+        if status == "downloading":
+            if video_id and video_id not in format_logged_ids:
+                format_logged_ids.add(video_id)
+                video_label = describe_video(info)
+                format_text = describe_formats(info, d)
+                if video_id:
+                    format_descriptions[video_id] = format_text
+                    video_labels[video_id] = video_label
+                print(
+                    f"{context_prefix()}Starting download for {video_label} using {format_text}",
+                )
+        elif status == "error":
+            video_label = video_labels.get(video_id) or describe_video(info)
+            format_text = format_descriptions.get(video_id)
+            if not format_text:
+                format_text = describe_formats(info, d)
+            fragment_url = d.get("fragment_url")
+            error_message = d.get("error") or d.get("message") or "unknown error"
+            details = [f"Download error for {video_label}"]
+            if format_text:
+                details.append(f"formats: {format_text}")
+            if fragment_url:
+                details.append(f"fragment: {fragment_url}")
+            details.append(f"yt-dlp said: {error_message}")
+            logger.error(" | ".join(details))
+            if video_id:
+                format_logged_ids.discard(video_id)
+                format_descriptions.pop(video_id, None)
+                video_labels.pop(video_id, None)
+        if status == "finished":
             info_id = None
-            info = d.get("info_dict")
             if isinstance(info, dict):
                 info_id = info.get("id")
             if info_id:
                 seen_ids.add(info_id)
+                video_label = video_labels.get(info_id) or describe_video(info)
+                format_text = format_descriptions.get(info_id)
+                completion_parts = [f"Completed download for {video_label}"]
+                if format_text:
+                    completion_parts.append(f"formats: {format_text}")
+                print(f"{context_prefix()}" + " | ".join(completion_parts))
+                format_logged_ids.discard(info_id)
+                format_descriptions.pop(info_id, None)
+                video_labels.pop(info_id, None)
             downloaded += 1
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
@@ -444,15 +576,54 @@ def run_download_attempt(
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             for u in urls:
-                print(f"\n=== Processing: {u} ===")
+                active_url = u
+                logger.set_context(active_url, client_label)
+                print(f"\n=== Processing with client {client_label}: {u} ===")
+
+                before_downloaded = downloaded
+                before_unavailable = logger.video_unavailable_errors
+                before_other = logger.other_errors
+                encountered_exception = False
+
                 try:
                     ydl.download([u])
                 except (DownloadError, ExtractorError) as exc:
+                    encountered_exception = True
                     logger.record_exception(exc)
                 except Exception as exc:  # pragma: no cover - defensive safety net
+                    encountered_exception = True
                     logger.record_exception(exc)
+                finally:
+                    after_downloaded = downloaded
+                    after_unavailable = logger.video_unavailable_errors
+                    after_other = logger.other_errors
+
+                    delta_downloaded = after_downloaded - before_downloaded
+                    delta_unavailable = after_unavailable - before_unavailable
+                    delta_other = after_other - before_other
+
+                    summary_parts = [f"{delta_downloaded} downloaded"]
+                    if delta_unavailable:
+                        summary_parts.append(f"{delta_unavailable} unavailable")
+                    if delta_other:
+                        summary_parts.append(f"{delta_other} other errors")
+                    if not delta_unavailable and not delta_other:
+                        summary_parts.append("no new errors")
+                    if encountered_exception and not (delta_unavailable or delta_other):
+                        summary_parts.append("see logs for details")
+                    if stopped_due_to_limit:
+                        summary_parts.append("stopped due to limit")
+
+                    print(
+                        f"{context_prefix()}URL summary: {u} -> {', '.join(summary_parts)}"
+                    )
+
+                    active_url = None
+
                 if stopped_due_to_limit:
                     break
+
+            logger.set_context(None, None)
     except KeyboardInterrupt:
         if stopped_due_to_limit:
             print("\nReached max download limit for this source; stopping.")
