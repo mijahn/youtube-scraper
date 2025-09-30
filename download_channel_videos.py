@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -36,6 +36,7 @@ class DownloadAttempt:
     downloaded: int
     video_unavailable_errors: int
     other_errors: int
+    retryable_error_ids: Set[str] = field(default_factory=set)
     stopped_due_to_limit: bool = False
 
 
@@ -57,6 +58,11 @@ class DownloadLogger:
         "this video can only be played",
     )
 
+    RETRYABLE_FRAGMENTS = (
+        "http error 403",
+        "forbidden",
+    )
+
     IGNORED_FRAGMENTS = (
         "does not have a shorts tab",
     )
@@ -66,10 +72,18 @@ class DownloadLogger:
         self.other_errors = 0
         self.current_url: Optional[str] = None
         self.current_client: Optional[str] = None
+        self.current_video_id: Optional[str] = None
+        self.retryable_error_ids: Set[str] = set()
 
-    def set_context(self, url: Optional[str], client: Optional[str]) -> None:
+    def set_context(
+        self, url: Optional[str], client: Optional[str], video_id: Optional[str] = None
+    ) -> None:
         self.current_url = url
         self.current_client = client
+        self.current_video_id = video_id
+
+    def set_video(self, video_id: Optional[str]) -> None:
+        self.current_video_id = video_id
 
     def _format_with_context(self, message: str) -> str:
         context_parts = []
@@ -77,6 +91,8 @@ class DownloadLogger:
             context_parts.append(f"client={self.current_client}")
         if self.current_url:
             context_parts.append(f"url={self.current_url}")
+        if self.current_video_id:
+            context_parts.append(f"video_id={self.current_video_id}")
         if context_parts:
             return f"[{' '.join(context_parts)}] {message}"
         return message
@@ -89,8 +105,14 @@ class DownloadLogger:
         if any(fragment in lowered for fragment in self.IGNORED_FRAGMENTS):
             return
 
+        is_retryable = any(
+            fragment in lowered for fragment in self.RETRYABLE_FRAGMENTS
+        )
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
+        elif is_retryable:
+            if self.current_video_id:
+                self.retryable_error_ids.add(self.current_video_id)
         else:
             self.other_errors += 1
 
@@ -508,6 +530,7 @@ def run_download_attempt(
     player_client: Optional[str],
     max_total: Optional[int],
     downloaded_ids: Optional[Set[str]],
+    target_video_ids: Optional[Set[str]] = None,
 ) -> DownloadAttempt:
     logger = DownloadLogger()
     downloaded = 0
@@ -629,7 +652,9 @@ def run_download_attempt(
             if fragment_url:
                 details.append(f"fragment: {fragment_url}")
             details.append(f"yt-dlp said: {error_message}")
+            logger.set_video(video_id)
             logger.error(" | ".join(details))
+            logger.set_video(None)
             if video_id:
                 format_logged_ids.discard(video_id)
                 format_descriptions.pop(video_id, None)
@@ -666,6 +691,16 @@ def run_download_attempt(
             return None
 
         extra_filters.append(match_filter)
+
+    if target_video_ids:
+
+        def retry_allowlist(info_dict: dict) -> Optional[str]:
+            video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+            if video_id and video_id not in target_video_ids:
+                return "Video not selected for retry"
+            return None
+
+        extra_filters.append(retry_allowlist)
 
     ydl_opts = build_ydl_options(args, player_client, logger, hook, extra_filters)
 
@@ -730,6 +765,7 @@ def run_download_attempt(
         downloaded=downloaded,
         video_unavailable_errors=logger.video_unavailable_errors,
         other_errors=logger.other_errors,
+        retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
     )
 
@@ -740,6 +776,8 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append(f"{attempt.video_unavailable_errors} unavailable")
     if attempt.other_errors:
         parts.append(f"{attempt.other_errors} other errors")
+    if attempt.retryable_error_ids:
+        parts.append(f"{len(attempt.retryable_error_ids)} retryable")
     if attempt.stopped_due_to_limit:
         parts.append("stopped due to limit")
     return ", ".join(parts)
@@ -768,13 +806,22 @@ def download_source(source: Source, args) -> None:
         client_attempts = list(DEFAULT_PLAYER_CLIENTS)
 
     downloaded_ids: Set[str] = set()
+    pending_retry_ids: Optional[Set[str]] = None
     total_downloaded = 0
     total_unavailable = 0
     total_other_errors = 0
     last_result: Optional[DownloadAttempt] = None
 
     for idx, client in enumerate(client_attempts):
-        result = run_download_attempt(urls, args, client, max_total, downloaded_ids)
+        target_ids = pending_retry_ids if pending_retry_ids else None
+        result = run_download_attempt(
+            urls,
+            args,
+            client,
+            max_total,
+            downloaded_ids,
+            target_ids,
+        )
         last_result = result
 
         total_downloaded += result.downloaded
@@ -787,18 +834,39 @@ def download_source(source: Source, args) -> None:
         )
 
         if result.stopped_due_to_limit:
+            pending_retry_ids = None
             break
 
         if args.youtube_client:
+            pending_retry_ids = None
             break
 
-        should_retry = (
+        next_client_available = idx < len(client_attempts) - 1
+
+        if result.retryable_error_ids:
+            if next_client_available:
+                pending_retry_ids = set(result.retryable_error_ids)
+                next_client = client_attempts[idx + 1]
+                retry_count = len(pending_retry_ids)
+                plural = "video" if retry_count == 1 else "videos"
+                print(
+                    "\nEncountered retryable HTTP 403 errors using the"
+                    f" {client!r} client. Retrying {retry_count} {plural} with"
+                    f" {next_client!r}..."
+                )
+                continue
+            pending_retry_ids = None
+            break
+
+        pending_retry_ids = None
+
+        should_retry_unavailable = (
             result.other_errors == 0
             and result.video_unavailable_errors > 0
-            and idx < len(client_attempts) - 1
+            and next_client_available
         )
 
-        if not should_retry:
+        if not should_retry_unavailable:
             break
 
         next_client = client_attempts[idx + 1]

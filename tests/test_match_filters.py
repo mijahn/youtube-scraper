@@ -103,3 +103,16 @@ def test_download_logger_classification(message: str, expected: str) -> None:
     else:
         assert logger.video_unavailable_errors == 0
         assert logger.other_errors == 2
+
+
+def test_download_logger_retryable_errors() -> None:
+    logger = dc.DownloadLogger()
+    logger.set_video("abc123def45")
+    logger.error("HTTP Error 403: Forbidden")
+    assert logger.retryable_error_ids == {"abc123def45"}
+    assert logger.other_errors == 0
+
+    logger.set_video("abc123def45")
+    logger.record_exception(RuntimeError("HTTP Error 403: Forbidden"))
+    assert logger.retryable_error_ids == {"abc123def45"}
+    assert logger.other_errors == 0
