@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 try:
     import yt_dlp
@@ -333,20 +333,48 @@ def build_ydl_options(args, player_client: Optional[str], logger: DownloadLogger
     return ydl_opts
 
 
-def run_download_attempt(urls: List[str], args, player_client: Optional[str], max_total: Optional[int]) -> DownloadAttempt:
+def run_download_attempt(
+    urls: List[str],
+    args,
+    player_client: Optional[str],
+    max_total: Optional[int],
+    downloaded_ids: Optional[Set[str]],
+) -> DownloadAttempt:
     logger = DownloadLogger()
     downloaded = 0
     stopped_due_to_limit = False
+    seen_ids: Set[str]
+    if downloaded_ids is not None:
+        seen_ids = downloaded_ids
+    else:
+        seen_ids = set()
 
     def hook(d):
         nonlocal downloaded, stopped_due_to_limit
         if d.get("status") == "finished":
+            info_id = None
+            info = d.get("info_dict")
+            if isinstance(info, dict):
+                info_id = info.get("id")
+            if info_id:
+                seen_ids.add(info_id)
             downloaded += 1
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
 
     ydl_opts = build_ydl_options(args, player_client, logger, hook)
+
+    if args.archive is None:
+        # Avoid re-downloading videos that completed successfully during
+        # earlier client attempts in this invocation.
+        def match_filter(info_dict):
+            video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+            if video_id and video_id in seen_ids:
+                return "Video already downloaded during previous client attempt"
+            return None
+
+        ydl_opts["match_filter"] = match_filter
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -386,8 +414,10 @@ def download_source(source: Source, args) -> None:
     else:
         client_attempts = ["web", "android", "ios", "tv"]
 
+    downloaded_ids: Set[str] = set()
+
     for idx, client in enumerate(client_attempts):
-        result = run_download_attempt(urls, args, client, max_total)
+        result = run_download_attempt(urls, args, client, max_total, downloaded_ids)
 
         if result.stopped_due_to_limit:
             break
@@ -395,15 +425,20 @@ def download_source(source: Source, args) -> None:
         if args.youtube_client:
             break
 
-        if result.downloaded > 0 or result.other_errors > 0 or result.video_unavailable_errors == 0:
+        should_retry = (
+            result.other_errors == 0
+            and result.video_unavailable_errors > 0
+            and idx < len(client_attempts) - 1
+        )
+
+        if not should_retry:
             break
 
-        if idx < len(client_attempts) - 1:
-            next_client = client_attempts[idx + 1]
-            print(
-                "\nEncountered only 'Video unavailable' errors using the"
-                f" {client!r} client. Retrying with {next_client!r}..."
-            )
+        next_client = client_attempts[idx + 1]
+        print(
+            "\nEncountered only 'Video unavailable' errors using the"
+            f" {client!r} client. Retrying with {next_client!r}..."
+        )
 
 
 def load_sources_from_url(url: str) -> List[Source]:
