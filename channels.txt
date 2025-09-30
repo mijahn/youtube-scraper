@@ -25,6 +25,7 @@ channel: https://www.youtube.com/@LennysPodcast
 playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
 playlist: https://www.youtube.com/playlist?list=PLzKwf01g-ajWthpdlugcAJ9eB96YZzjIv
 playlist: https://www.youtube.com/playlist?list=PL8gDpwTEj4yIPs6WpjqavbAY8eFN9tWHh
+playlist: https://www.youtube.com/playlist?list=PLVIaKJMqVHi4oanGI5PwdOUwd8nH-g2Td
 
 # videos
 video: https://www.youtube.com/watch?v=Dif1hwBejCk
