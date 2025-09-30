@@ -70,19 +70,23 @@ def test_build_ydl_options_combines_filters(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "message, expected_unavailable",
+    "message, expected",
     [
-        ("Video unavailable", True),
-        ("Sign in to confirm your age", True),
-        ("This video is private", True),
-        ("Some other random failure", False),
+        ("Video unavailable", "unavailable"),
+        ("Sign in to confirm your age", "unavailable"),
+        ("This video is private", "unavailable"),
+        ("Some other random failure", "other"),
+        ("Channel XYZ does not have a Shorts tab", "ignored"),
     ],
 )
-def test_download_logger_classification(message: str, expected_unavailable: bool) -> None:
+def test_download_logger_classification(message: str, expected: str) -> None:
     logger = dc.DownloadLogger()
     logger.error(message)
-    if expected_unavailable:
+    if expected == "unavailable":
         assert logger.video_unavailable_errors == 1
+        assert logger.other_errors == 0
+    elif expected == "ignored":
+        assert logger.video_unavailable_errors == 0
         assert logger.other_errors == 0
     else:
         assert logger.video_unavailable_errors == 0
@@ -90,8 +94,11 @@ def test_download_logger_classification(message: str, expected_unavailable: bool
 
     # Exceptions should be classified the same way.
     logger.record_exception(RuntimeError(message))
-    if expected_unavailable:
+    if expected == "unavailable":
         assert logger.video_unavailable_errors == 2
+        assert logger.other_errors == 0
+    elif expected == "ignored":
+        assert logger.video_unavailable_errors == 0
         assert logger.other_errors == 0
     else:
         assert logger.video_unavailable_errors == 0
