@@ -25,7 +25,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     import yt_dlp
-    from yt_dlp.utils import DownloadError, ExtractorError
+    from yt_dlp.utils import DownloadCancelled, DownloadError, ExtractorError
     from yt_dlp.extractor.youtube import YoutubeIE
     try:
         from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
@@ -45,6 +45,8 @@ class DownloadAttempt:
     downloaded_video_ids: Set[str] = field(default_factory=set)
     retryable_error_ids: Set[str] = field(default_factory=set)
     stopped_due_to_limit: bool = False
+    failure_count: int = 0
+    failure_limit_reached: bool = False
 
 
 class DownloadLogger:
@@ -294,6 +296,8 @@ def _default_player_clients() -> Tuple[str, ...]:
 
 
 DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
+
+MAX_FAILURES_PER_CLIENT = 5
 
 
 def normalize_url(url: str) -> str:
@@ -897,6 +901,8 @@ def run_download_attempt(
     logger = DownloadLogger()
     downloaded = 0
     stopped_due_to_limit = False
+    failure_limit_reached = False
+    generic_failures = 0
     seen_ids: Set[str]
     if downloaded_ids is not None:
         seen_ids = downloaded_ids
@@ -904,6 +910,7 @@ def run_download_attempt(
         seen_ids = set()
     detected_ids: Set[str] = set()
     completed_ids: Set[str] = set()
+    failed_video_ids: Set[str] = set()
 
     client_label = player_client if player_client else "default"
     active_url: Optional[str] = None
@@ -991,8 +998,31 @@ def run_download_attempt(
         f"urls={urls}"
     )
 
+    def register_failure(
+        failed_video_id: Optional[str], *, interrupt: bool
+    ) -> None:
+        nonlocal failure_limit_reached, generic_failures
+        if failure_limit_reached:
+            return
+        if failed_video_id:
+            if failed_video_id in completed_ids:
+                return
+            if failed_video_id in failed_video_ids:
+                return
+            failed_video_ids.add(failed_video_id)
+        else:
+            generic_failures += 1
+
+        failure_total = len(failed_video_ids) + generic_failures
+        if failure_total >= MAX_FAILURES_PER_CLIENT:
+            failure_limit_reached = True
+            if interrupt:
+                raise DownloadCancelled(
+                    f"Aborting client {client_label} after {failure_total} download failures"
+                )
+
     def hook(d):
-        nonlocal downloaded, stopped_due_to_limit
+        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached, generic_failures
         status = d.get("status")
         info = d.get("info_dict")
         video_id = info.get("id") if isinstance(info, dict) else None
@@ -1031,6 +1061,7 @@ def run_download_attempt(
                 format_logged_ids.discard(video_id)
                 format_descriptions.pop(video_id, None)
                 video_labels.pop(video_id, None)
+            register_failure(video_id, interrupt=True)
         if status == "finished":
             info_id = None
             if isinstance(info, dict):
@@ -1097,11 +1128,17 @@ def run_download_attempt(
 
                 try:
                     ydl.download([u])
+                except DownloadCancelled:
+                    encountered_exception = True
+                    register_failure(None, interrupt=False)
+                    # Failure threshold reached; no need to log extra noise.
                 except (DownloadError, ExtractorError) as exc:
                     encountered_exception = True
+                    register_failure(None, interrupt=False)
                     logger.record_exception(exc)
                 except Exception as exc:  # pragma: no cover - defensive safety net
                     encountered_exception = True
+                    register_failure(None, interrupt=False)
                     logger.record_exception(exc)
                 finally:
                     after_downloaded = downloaded
@@ -1133,6 +1170,8 @@ def run_download_attempt(
 
                 if stopped_due_to_limit:
                     break
+                if failure_limit_reached:
+                    break
 
             logger.set_context(None, None)
             logger.set_video(None)
@@ -1141,6 +1180,8 @@ def run_download_attempt(
             print("\nReached max download limit for this source; stopping.")
         else:
             raise
+    except DownloadCancelled:
+        failure_limit_reached = True
 
     return DownloadAttempt(
         downloaded=downloaded,
@@ -1150,6 +1191,8 @@ def run_download_attempt(
         downloaded_video_ids=set(completed_ids),
         retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
+        failure_count=len(failed_video_ids) + generic_failures,
+        failure_limit_reached=failure_limit_reached,
     )
 
 
@@ -1163,6 +1206,10 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append(f"{len(attempt.retryable_error_ids)} retryable")
     if attempt.stopped_due_to_limit:
         parts.append("stopped due to limit")
+    if attempt.failure_limit_reached:
+        parts.append(
+            f"reached failure limit ({MAX_FAILURES_PER_CLIENT})"
+        )
     return ", ".join(parts)
 
 
@@ -1204,12 +1251,15 @@ def download_source(source: Source, args) -> None:
     max_total = args.max if isinstance(args.max, int) and args.max > 0 else None
 
     client_attempts: List[Optional[str]]
+    available_clients = list(PLAYER_CLIENT_CHOICES)
     if args.youtube_client:
         preferred = args.youtube_client
-        remaining = [client for client in DEFAULT_PLAYER_CLIENTS if client != preferred]
+        remaining = [client for client in available_clients if client != preferred]
         client_attempts = [preferred] + remaining
     else:
-        client_attempts = list(DEFAULT_PLAYER_CLIENTS)
+        default_sequence = list(DEFAULT_PLAYER_CLIENTS)
+        additional = [client for client in available_clients if client not in default_sequence]
+        client_attempts = default_sequence + additional
 
     downloaded_ids: Set[str] = set()
     metadata_video_ids = collect_all_video_ids(urls, args, client_attempts[0] if client_attempts else None)
@@ -1255,6 +1305,22 @@ def download_source(source: Source, args) -> None:
             break
 
         next_client_available = idx < len(client_attempts) - 1
+
+        if result.failure_limit_reached:
+            pending_retry_ids = None
+            if next_client_available:
+                next_client = client_attempts[idx + 1]
+                print(
+                    "\nReached the maximum of"
+                    f" {MAX_FAILURES_PER_CLIENT} failed downloads with the"
+                    f" {client!r} client. Trying {next_client!r} next..."
+                )
+                continue
+            print(
+                "\nReached the maximum number of failed downloads and no"
+                f" additional clients are available after {client!r}."
+            )
+            break
 
         if result.retryable_error_ids:
             if next_client_available:
