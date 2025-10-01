@@ -78,13 +78,22 @@ class DownloadLogger:
         "does not have a shorts tab",
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self, failure_callback: Optional[Callable[[Optional[str]], None]] = None
+    ) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
         self.current_url: Optional[str] = None
         self.current_client: Optional[str] = None
         self.current_video_id: Optional[str] = None
         self.retryable_error_ids: Set[str] = set()
+        self._failure_callback = failure_callback
+        self._last_reported_failure: Optional[Tuple[Optional[str], str]] = None
+
+    def set_failure_callback(
+        self, callback: Optional[Callable[[Optional[str]], None]]
+    ) -> None:
+        self._failure_callback = callback
 
     def set_context(
         self, url: Optional[str], client: Optional[str], video_id: Optional[str] = None
@@ -92,8 +101,11 @@ class DownloadLogger:
         self.current_url = url
         self.current_client = client
         self.current_video_id = video_id
+        self._last_reported_failure = None
 
     def set_video(self, video_id: Optional[str]) -> None:
+        if video_id != self.current_video_id:
+            self._last_reported_failure = None
         self.current_video_id = video_id
 
     def _format_with_context(self, message: str) -> str:
@@ -121,11 +133,22 @@ class DownloadLogger:
         )
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
-        elif is_retryable:
+            self._last_reported_failure = None
+            return
+
+        key = (self.current_video_id, lowered)
+        if key == self._last_reported_failure:
+            return
+
+        if is_retryable:
             if self.current_video_id:
                 self.retryable_error_ids.add(self.current_video_id)
         else:
             self.other_errors += 1
+
+        self._last_reported_failure = key
+        if self._failure_callback:
+            self._failure_callback(self.current_video_id)
 
     @staticmethod
     def _ensure_text(message) -> str:
@@ -1044,6 +1067,10 @@ def run_download_attempt(
                     f"Aborting client {client_label} after {failure_total} download failures"
                 )
 
+    logger.set_failure_callback(
+        lambda video_id: register_failure(video_id, interrupt=True)
+    )
+
     def hook(d):
         nonlocal downloaded, stopped_due_to_limit, failure_limit_reached
         status = d.get("status")
@@ -1078,13 +1105,14 @@ def run_download_attempt(
                 details.append(f"fragment: {fragment_url}")
             details.append(f"yt-dlp said: {error_message}")
             logger.set_video(video_id)
-            logger.error(" | ".join(details))
-            logger.set_video(None)
-            if video_id:
-                format_logged_ids.discard(video_id)
-                format_descriptions.pop(video_id, None)
-                video_labels.pop(video_id, None)
-            register_failure(video_id, interrupt=True)
+            try:
+                logger.error(" | ".join(details))
+            finally:
+                logger.set_video(None)
+                if video_id:
+                    format_logged_ids.discard(video_id)
+                    format_descriptions.pop(video_id, None)
+                    video_labels.pop(video_id, None)
         if status == "finished":
             info_id = None
             if isinstance(info, dict):
@@ -1149,6 +1177,7 @@ def run_download_attempt(
                 before_downloaded = downloaded
                 before_unavailable = logger.video_unavailable_errors
                 before_other = logger.other_errors
+                before_failures = failure_events
                 encountered_exception = False
 
                 try:
@@ -1169,17 +1198,21 @@ def run_download_attempt(
                     after_downloaded = downloaded
                     after_unavailable = logger.video_unavailable_errors
                     after_other = logger.other_errors
+                    after_failures = failure_events
 
                     delta_downloaded = after_downloaded - before_downloaded
                     delta_unavailable = after_unavailable - before_unavailable
                     delta_other = after_other - before_other
+                    delta_failures = after_failures - before_failures
 
                     summary_parts = [f"{delta_downloaded} downloaded"]
                     if delta_unavailable:
                         summary_parts.append(f"{delta_unavailable} unavailable")
                     if delta_other:
                         summary_parts.append(f"{delta_other} other errors")
-                    if not delta_unavailable and not delta_other:
+                    if delta_failures:
+                        summary_parts.append(f"{delta_failures} failures")
+                    if not delta_unavailable and not delta_other and not delta_failures:
                         summary_parts.append("no new errors")
                     if encountered_exception and not (delta_unavailable or delta_other):
                         summary_parts.append("see logs for details")
@@ -1229,6 +1262,8 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append(f"{attempt.other_errors} other errors")
     if attempt.retryable_error_ids:
         parts.append(f"{len(attempt.retryable_error_ids)} retryable")
+    if attempt.failure_count:
+        parts.append(f"{attempt.failure_count} failures")
     if attempt.stopped_due_to_limit:
         parts.append("stopped due to limit")
     if attempt.failure_limit_reached:
