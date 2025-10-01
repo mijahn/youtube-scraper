@@ -324,3 +324,48 @@ def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.Mon
     assert attempt.failure_limit_reached is True
     assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
     assert "video-1" in attempt.retryable_error_ids
+
+
+def test_run_download_attempt_logger_errors_trigger_failure_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            logger = self.params.get("logger")
+            assert isinstance(logger, dc.DownloadLogger)
+            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+                logger.set_video(f"video-{idx}")
+                try:
+                    logger.error("Requested format is not available")
+                except dc.DownloadCancelled:
+                    raise
+                finally:
+                    logger.set_video(None)
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="web",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == 0
+    assert attempt.other_errors == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_limit_reached is True
+    assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert not attempt.retryable_error_ids
