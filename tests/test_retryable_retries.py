@@ -45,6 +45,8 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
     args = make_args()
 
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+
     calls = []
 
     def fake_run_download_attempt(
@@ -96,6 +98,8 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
     args = make_args()
 
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+
     calls = []
 
     def fake_run_download_attempt(
@@ -140,6 +144,8 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
     args = make_args()
 
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+
     calls = []
 
     def fake_run_download_attempt(
@@ -179,6 +185,47 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
     assert calls[0]["seen"] == set()
     assert calls[1]["seen"] == {"first-id"}
 
+
+def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    args = make_args()
+
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+    ):
+        return dc.DownloadAttempt(
+            downloaded=2,
+            video_unavailable_errors=0,
+            other_errors=0,
+            detected_video_ids={"vid1", "vid2", "vid3"},
+            downloaded_video_ids={"vid1", "vid2"},
+            retryable_error_ids=set(),
+            stopped_due_to_limit=False,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    captured = capsys.readouterr()
+    assert "\033[1;45;97m" in captured.out
+    assert "Summary for @Example" in captured.out
+
+    lines = captured.out.splitlines()
+    detected_line = next(line for line in lines if "Total videos detected:" in line)
+    downloaded_line = next(line for line in lines if "Total videos downloaded:" in line)
+    pending_line = next(line for line in lines if "Total videos not downloaded:" in line)
+
+    assert "3" in detected_line
+    assert "2" in downloaded_line
+    assert "1" in pending_line
 
 def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.MonkeyPatch) -> None:
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
