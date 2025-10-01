@@ -41,6 +41,8 @@ class DownloadAttempt:
     downloaded: int
     video_unavailable_errors: int
     other_errors: int
+    detected_video_ids: Set[str] = field(default_factory=set)
+    downloaded_video_ids: Set[str] = field(default_factory=set)
     retryable_error_ids: Set[str] = field(default_factory=set)
     stopped_due_to_limit: bool = False
 
@@ -829,12 +831,19 @@ def run_download_attempt(
         seen_ids = downloaded_ids
     else:
         seen_ids = set()
+    detected_ids: Set[str] = set()
+    completed_ids: Set[str] = set()
 
     client_label = player_client if player_client else "default"
     active_url: Optional[str] = None
     format_logged_ids: Set[str] = set()
     format_descriptions: Dict[str, str] = {}
     video_labels: Dict[str, str] = {}
+
+    def record_video_detection(video_id: Optional[str]) -> None:
+        if not video_id:
+            return
+        detected_ids.add(video_id)
 
     def describe_format_entry(entry: Optional[dict]) -> str:
         if not isinstance(entry, dict):
@@ -917,6 +926,9 @@ def run_download_attempt(
         info = d.get("info_dict")
         video_id = info.get("id") if isinstance(info, dict) else None
 
+        if video_id:
+            record_video_detection(video_id)
+
         if status == "downloading":
             if video_id and video_id not in format_logged_ids:
                 format_logged_ids.add(video_id)
@@ -953,6 +965,7 @@ def run_download_attempt(
             if isinstance(info, dict):
                 info_id = info.get("id")
             if info_id:
+                record_video_detection(info_id)
                 seen_ids.add(info_id)
                 video_label = video_labels.get(info_id) or describe_video(info)
                 format_text = format_descriptions.get(info_id)
@@ -963,10 +976,12 @@ def run_download_attempt(
                 format_logged_ids.discard(info_id)
                 format_descriptions.pop(info_id, None)
                 video_labels.pop(info_id, None)
+                completed_ids.add(info_id)
             downloaded += 1
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
+            logger.set_video(None)
 
     extra_filters: List[Callable[[dict], Optional[str]]] = []
 
@@ -975,6 +990,8 @@ def run_download_attempt(
         # earlier client attempts in this invocation.
         def match_filter(info_dict: dict) -> Optional[str]:
             video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+            if video_id:
+                record_video_detection(video_id)
             if video_id and video_id in seen_ids:
                 return "Video already downloaded during previous client attempt"
             return None
@@ -985,6 +1002,8 @@ def run_download_attempt(
 
         def retry_allowlist(info_dict: dict) -> Optional[str]:
             video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+            if video_id:
+                record_video_detection(video_id)
             if video_id and video_id not in target_video_ids:
                 return "Video not selected for retry"
             return None
@@ -1039,11 +1058,13 @@ def run_download_attempt(
                     )
 
                     active_url = None
+                    logger.set_video(None)
 
                 if stopped_due_to_limit:
                     break
 
             logger.set_context(None, None)
+            logger.set_video(None)
     except KeyboardInterrupt:
         if stopped_due_to_limit:
             print("\nReached max download limit for this source; stopping.")
@@ -1054,6 +1075,8 @@ def run_download_attempt(
         downloaded=downloaded,
         video_unavailable_errors=logger.video_unavailable_errors,
         other_errors=logger.other_errors,
+        detected_video_ids=set(detected_ids),
+        downloaded_video_ids=set(completed_ids),
         retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
     )
@@ -1072,6 +1095,25 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
     return ", ".join(parts)
 
 
+def summarize_source_label(source: Source, display_url: str) -> str:
+    if source.kind is SourceType.CHANNEL:
+        handle_match = re.search(r"/(@[^/]+)", display_url)
+        if handle_match:
+            return handle_match.group(1)
+        channel_match = re.search(r"/channel/([^/?]+)", display_url)
+        if channel_match:
+            return f"channel {channel_match.group(1)}"
+    if source.kind is SourceType.PLAYLIST:
+        parsed = urllib.parse.urlparse(display_url)
+        if parsed.query:
+            return f"playlist {parsed.query}"
+    if source.kind is SourceType.VIDEO:
+        parsed = urllib.parse.urlparse(display_url)
+        if parsed.query:
+            return f"video {parsed.query}"
+    return display_url
+
+
 def download_source(source: Source, args) -> None:
     try:
         urls = source.build_download_urls(include_shorts=not args.no_shorts)
@@ -1079,6 +1121,8 @@ def download_source(source: Source, args) -> None:
     except ValueError as exc:
         print(f"Skipping {source.kind.value} source due to invalid URL: {exc}", file=sys.stderr)
         return
+
+    summary_label = summarize_source_label(source, display_url)
 
     print(f"\n=== Starting downloads for {source.kind.value}: {display_url} ===")
     print(
@@ -1097,6 +1141,8 @@ def download_source(source: Source, args) -> None:
         client_attempts = list(DEFAULT_PLAYER_CLIENTS)
 
     downloaded_ids: Set[str] = set()
+    detected_ids: Set[str] = set()
+    downloaded_in_session: Set[str] = set()
     pending_retry_ids: Optional[Set[str]] = None
     total_downloaded = 0
     total_unavailable = 0
@@ -1118,6 +1164,8 @@ def download_source(source: Source, args) -> None:
         total_downloaded += result.downloaded
         total_unavailable += result.video_unavailable_errors
         total_other_errors += result.other_errors
+        detected_ids.update(result.detected_video_ids)
+        downloaded_in_session.update(result.downloaded_video_ids)
 
         client_label = client if client else "default"
         print(
@@ -1203,6 +1251,34 @@ def download_source(source: Source, args) -> None:
             f"Encountered {total_other_errors} download errors. See logs above for details.",
             file=sys.stderr,
         )
+
+    total_detected = len(detected_ids)
+    total_downloaded_now = len(downloaded_in_session)
+    total_pending = max(total_detected - total_downloaded_now, 0)
+
+    border_width = max(len(f" Summary for {summary_label} "), 36)
+    border_color = "\033[95m"
+    header_color = "\033[1;45;97m"
+    label_color = "\033[1;36m"
+    value_color = "\033[1;33m"
+    reset = "\033[0m"
+
+    border_line = f"{border_color}{'=' * border_width}{reset}"
+    header_text = f" Summary for {summary_label} "
+
+    print("\n" + border_line)
+    print(f"{header_color}{header_text.center(border_width)}{reset}")
+    print(border_line)
+    print(f"{label_color}Total videos detected:{reset} {value_color}{total_detected}{reset}")
+    print(
+        f"{label_color}Total videos downloaded:{reset} "
+        f"{value_color}{total_downloaded_now}{reset}"
+    )
+    print(
+        f"{label_color}Total videos not downloaded:{reset} "
+        f"{value_color}{total_pending}{reset}"
+    )
+    print(border_line)
 
 
 def load_sources_from_url(url: str) -> List[Source]:
