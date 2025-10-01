@@ -278,3 +278,49 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
     assert len(calls) >= 2
     assert calls[0] == primary
     assert calls[1] == fallback_order[0]
+
+
+def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            assert hooks, "Expected at least one progress hook"
+            hook = hooks[0]
+            info = {"id": "video-1", "title": "Example"}
+            payload = {
+                "status": "error",
+                "info_dict": info,
+                "error": "HTTP Error 403: Forbidden",
+            }
+            for _ in range(dc.MAX_FAILURES_PER_CLIENT):
+                try:
+                    hook(dict(payload))
+                except dc.DownloadCancelled:
+                    raise
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="tv",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == 0
+    assert attempt.failure_limit_reached is True
+    assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert "video-1" in attempt.retryable_error_ids
