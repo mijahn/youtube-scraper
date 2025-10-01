@@ -433,6 +433,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH)")
     parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
     parser.add_argument("--skip-thumbs", action="store_true", help="Do not download thumbnails")
+    parser.add_argument(
+        "--format",
+        default=None,
+        help=(
+            "Format selector passed to yt-dlp. Defaults to yt-dlp's native behaviour when omitted, "
+            "which picks the best available combination without forcing a container."
+        ),
+    )
+    parser.add_argument(
+        "--merge-output-format",
+        default=None,
+        help=(
+            "Container format for merged downloads (passed to yt-dlp). "
+            "If omitted, yt-dlp will keep the original container when possible."
+        ),
+    )
     parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.)")
     parser.add_argument(
         "--sleep-requests",
@@ -711,8 +727,6 @@ def build_ydl_options(
     )
 
     ydl_opts = {
-        "format": "bv*+ba/b",
-        "merge_output_format": "mp4",
         "continuedl": True,
         "ignoreerrors": "only_download",
         "noprogress": False,
@@ -732,6 +746,13 @@ def build_ydl_options(
         "progress_hooks": [hook],
     }
 
+    format_selector = getattr(args, "format", None)
+    merge_format = getattr(args, "merge_output_format", None)
+
+    if format_selector:
+        ydl_opts["format"] = format_selector
+    if merge_format:
+        ydl_opts["merge_output_format"] = merge_format
     if args.rate_limit:
         ydl_opts["ratelimit"] = args.rate_limit
     if args.concurrency and args.concurrency > 0:
@@ -838,7 +859,12 @@ def build_ydl_options(
     if combined_filter:
         ydl_opts["match_filter"] = combined_filter
 
-    debug_parts = [f"format={ydl_opts['format']}"]
+    if format_selector:
+        debug_parts = [f"format={format_selector}"]
+    else:
+        debug_parts = ["format=yt-dlp-default"]
+    if merge_format:
+        debug_parts.append(f"merge_output_format={merge_format}")
     if player_client:
         debug_parts.append(f"player_client={player_client}")
     if args.youtube_fetch_po_token:
@@ -902,7 +928,7 @@ def run_download_attempt(
     downloaded = 0
     stopped_due_to_limit = False
     failure_limit_reached = False
-    generic_failures = 0
+    failure_events = 0
     seen_ids: Set[str]
     if downloaded_ids is not None:
         seen_ids = downloaded_ids
@@ -993,27 +1019,24 @@ def run_download_attempt(
         return f"[{' '.join(parts)}] "
 
     print(
-        "Starting download attempt with "
-        f"client={client_label}, max_total={'no-limit' if max_total is None else max_total}, "
-        f"urls={urls}"
+        f"[client={client_label}] Starting download attempt "
+        f"with max_total={'no-limit' if max_total is None else max_total}, urls={urls}"
     )
 
     def register_failure(
         failed_video_id: Optional[str], *, interrupt: bool
     ) -> None:
-        nonlocal failure_limit_reached, generic_failures
+        nonlocal failure_limit_reached, failure_events
         if failure_limit_reached:
             return
-        if failed_video_id:
-            if failed_video_id in completed_ids:
-                return
-            if failed_video_id in failed_video_ids:
-                return
-            failed_video_ids.add(failed_video_id)
-        else:
-            generic_failures += 1
+        if failed_video_id and failed_video_id in completed_ids:
+            return
 
-        failure_total = len(failed_video_ids) + generic_failures
+        failure_events += 1
+        if failed_video_id:
+            failed_video_ids.add(failed_video_id)
+
+        failure_total = failure_events
         if failure_total >= MAX_FAILURES_PER_CLIENT:
             failure_limit_reached = True
             if interrupt:
@@ -1022,7 +1045,7 @@ def run_download_attempt(
                 )
 
     def hook(d):
-        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached, generic_failures
+        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached
         status = d.get("status")
         info = d.get("info_dict")
         video_id = info.get("id") if isinstance(info, dict) else None
@@ -1119,7 +1142,9 @@ def run_download_attempt(
             for u in urls:
                 active_url = u
                 logger.set_context(active_url, client_label)
-                print(f"\n=== Processing with client {client_label}: {u} ===")
+                print(
+                    f"\n{context_prefix()}--- Starting downloads for URL: {u} ---"
+                )
 
                 before_downloaded = downloaded
                 before_unavailable = logger.video_unavailable_errors
@@ -1191,7 +1216,7 @@ def run_download_attempt(
         downloaded_video_ids=set(completed_ids),
         retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
-        failure_count=len(failed_video_ids) + generic_failures,
+        failure_count=failure_events,
         failure_limit_reached=failure_limit_reached,
     )
 
@@ -1277,8 +1302,21 @@ def download_source(source: Source, args) -> None:
     total_other_errors = 0
     last_result: Optional[DownloadAttempt] = None
 
+    total_client_attempts = len(client_attempts)
+
+    def print_client_switch_banner(attempt_number: int, client_label: str) -> None:
+        border = "=" * 80
+        header = (
+            f" >>> Attempt {attempt_number}/{total_client_attempts}: Using YouTube client {client_label} <<< "
+        )
+        print("\n" + border)
+        print(header.center(len(border)))
+        print(border)
+
     for idx, client in enumerate(client_attempts):
         target_ids = pending_retry_ids if pending_retry_ids else None
+        client_label = client if client else "default"
+        print_client_switch_banner(idx + 1, client_label)
         result = run_download_attempt(
             urls,
             args,
@@ -1295,7 +1333,6 @@ def download_source(source: Source, args) -> None:
         detected_ids.update(result.detected_video_ids)
         downloaded_in_session.update(result.downloaded_video_ids)
 
-        client_label = client if client else "default"
         print(
             f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
         )

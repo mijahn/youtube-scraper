@@ -87,6 +87,12 @@ The downloader now automatically retries with different YouTube player clients w
   CLIENT.CONTEXT+TOKEN` when integrating an external provider.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
 
+### Preserving original formats
+
+The downloader now relies on yt-dlp's native format selection so videos are saved in whatever container YouTube provides.
+If you need to override the selection you can pass a custom `--format` expression or request a specific merged container via
+`--merge-output-format`, both of which are forwarded directly to yt-dlp.
+
 ### Automatic authentication defaults
 
 If you routinely run the script with the same authentication details you can configure them once via environment
