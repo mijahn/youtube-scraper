@@ -151,6 +151,77 @@ class DownloadLogger:
         self._handle_message(text)
 
 
+def _collect_video_ids_from_info(info: object, dest: Set[str]) -> None:
+    """Recursively extract video identifiers from yt-dlp metadata objects."""
+
+    if info is None:
+        return
+
+    if isinstance(info, list):
+        for entry in info:
+            _collect_video_ids_from_info(entry, dest)
+        return
+
+    if not isinstance(info, dict):
+        return
+
+    info_type = info.get("_type")
+
+    if info_type in {"playlist", "multi_video", "compat_list"}:
+        entries = info.get("entries") or []
+        _collect_video_ids_from_info(entries, dest)
+        return
+
+    if info_type == "url" and "entries" in info:
+        _collect_video_ids_from_info(info.get("entries"), dest)
+
+    video_id = info.get("id")
+    if video_id:
+        dest.add(str(video_id))
+
+
+def collect_all_video_ids(
+    urls: Iterable[str], args, player_client: Optional[str]
+) -> Set[str]:
+    """Fetch playlist metadata to determine every video ID for the given URLs."""
+
+    logger = DownloadLogger()
+
+    def noop_hook(_):
+        return None
+
+    ydl_opts = build_ydl_options(args, player_client, logger, noop_hook)
+
+    ydl_opts["skip_download"] = True
+    ydl_opts["quiet"] = True
+    ydl_opts["no_warnings"] = True
+    ydl_opts["progress_hooks"] = []
+    ydl_opts["writethumbnail"] = False
+    ydl_opts["writesubtitles"] = False
+    ydl_opts["writeautomaticsub"] = False
+    ydl_opts.pop("download_archive", None)
+    ydl_opts.pop("match_filter", None)
+
+    video_ids: Set[str] = set()
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            for url in urls:
+                try:
+                    info = ydl.extract_info(url, download=False)
+                except (DownloadError, ExtractorError) as exc:
+                    logger.record_exception(exc)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.record_exception(exc)
+                    continue
+                _collect_video_ids_from_info(info, video_ids)
+    except KeyboardInterrupt:
+        raise
+
+    return video_ids
+
+
 class SourceType(Enum):
     CHANNEL = "channel"
     PLAYLIST = "playlist"
@@ -1141,7 +1212,14 @@ def download_source(source: Source, args) -> None:
         client_attempts = list(DEFAULT_PLAYER_CLIENTS)
 
     downloaded_ids: Set[str] = set()
-    detected_ids: Set[str] = set()
+    metadata_video_ids = collect_all_video_ids(urls, args, client_attempts[0] if client_attempts else None)
+    if metadata_video_ids:
+        print(
+            "\nMetadata scan detected"
+            f" {len(metadata_video_ids)} video"
+            f"{'s' if len(metadata_video_ids) != 1 else ''} before downloading."
+        )
+    detected_ids: Set[str] = set(metadata_video_ids)
     downloaded_in_session: Set[str] = set()
     pending_retry_ids: Optional[Set[str]] = None
     total_downloaded = 0
