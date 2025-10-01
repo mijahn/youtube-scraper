@@ -300,6 +300,16 @@ DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
 MAX_FAILURES_PER_CLIENT = 5
 
 
+@dataclass
+class FormatSelection:
+    requested: Optional[str]
+    effective: Optional[str]
+    fallback_reason: Optional[str] = None
+
+
+MUXED_ONLY_CLIENTS: Set[str] = {"ios"}
+
+
 def normalize_url(url: str) -> str:
     cleaned = url.strip()
     if not cleaned:
@@ -714,6 +724,32 @@ def _combine_match_filters(
     return combined
 
 
+def _format_requires_separate_streams(format_selector: str) -> bool:
+    normalized = format_selector.lower()
+    if "+" in normalized or "/" in normalized:
+        return True
+    return bool(re.search(r"(?:best|worst)?video", normalized))
+
+
+def select_format_for_client(args, player_client: Optional[str]) -> FormatSelection:
+    requested = getattr(args, "format", None)
+    if not requested:
+        return FormatSelection(requested=None, effective=None)
+
+    if not player_client:
+        return FormatSelection(requested=requested, effective=requested)
+
+    if player_client in MUXED_ONLY_CLIENTS and _format_requires_separate_streams(requested):
+        fallback = "best"
+        reason = (
+            f"Requested format '{requested}' requires separate audio/video streams, "
+            f"but client '{player_client}' only provides muxed formats. Falling back to '{fallback}'."
+        )
+        return FormatSelection(requested=requested, effective=fallback, fallback_reason=reason)
+
+    return FormatSelection(requested=requested, effective=requested)
+
+
 def build_ydl_options(
     args,
     player_client: Optional[str],
@@ -746,7 +782,9 @@ def build_ydl_options(
         "progress_hooks": [hook],
     }
 
-    format_selector = getattr(args, "format", None)
+    format_selection = select_format_for_client(args, player_client)
+    format_selector = format_selection.effective
+    requested_format = format_selection.requested
     merge_format = getattr(args, "merge_output_format", None)
 
     if format_selector:
@@ -860,9 +898,16 @@ def build_ydl_options(
         ydl_opts["match_filter"] = combined_filter
 
     if format_selector:
-        debug_parts = [f"format={format_selector}"]
+        debug_format = f"format={format_selector}"
+        if requested_format and requested_format != format_selector:
+            debug_format += f" (requested {requested_format})"
+        debug_parts = [debug_format]
     else:
         debug_parts = ["format=yt-dlp-default"]
+    if format_selection.fallback_reason:
+        debug_parts.append(
+            f"format_fallback={format_selection.fallback_reason}"
+        )
     if merge_format:
         debug_parts.append(f"merge_output_format={merge_format}")
     if player_client:
