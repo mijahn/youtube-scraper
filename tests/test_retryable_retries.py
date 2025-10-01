@@ -46,6 +46,7 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
     args = make_args()
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
 
     calls = []
@@ -100,6 +101,7 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
     args = make_args()
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
 
     calls = []
@@ -147,6 +149,7 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
     args = make_args()
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
 
     calls = []
@@ -194,6 +197,7 @@ def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys)
     args = make_args()
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: {"vid1", "vid2", "vid3"})
 
     def fake_run_download_attempt(
@@ -237,6 +241,7 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
     args = make_args(youtube_client=primary)
 
     monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", tuple(dc.DEFAULT_PLAYER_CLIENTS))
 
     calls = []
 
