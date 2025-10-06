@@ -49,6 +49,12 @@ class DownloadAttempt:
     failure_limit_reached: bool = False
 
 
+@dataclass
+class DownloadArchiveState:
+    path: str
+    known_ids: Set[str] = field(default_factory=set)
+
+
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
@@ -173,6 +179,7 @@ class DownloadLogger:
     def record_exception(self, exc: Exception) -> None:
         text = self._ensure_text(str(exc))
         self._print(text, file=sys.stderr)
+        self._last_reported_failure = None
         self._handle_message(text)
 
 
@@ -991,6 +998,7 @@ def run_download_attempt(
     max_total: Optional[int],
     downloaded_ids: Optional[Set[str]],
     target_video_ids: Optional[Set[str]] = None,
+    download_archive: Optional[DownloadArchiveState] = None,
 ) -> DownloadAttempt:
     logger = DownloadLogger()
     downloaded = 0
@@ -1175,6 +1183,9 @@ def run_download_attempt(
                 format_descriptions.pop(info_id, None)
                 video_labels.pop(info_id, None)
                 completed_ids.add(info_id)
+                if download_archive and info_id not in download_archive.known_ids:
+                    _append_to_download_archive(download_archive.path, info_id)
+                    download_archive.known_ids.add(info_id)
             downloaded += 1
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
@@ -1183,18 +1194,15 @@ def run_download_attempt(
 
     extra_filters: List[Callable[[dict], Optional[str]]] = []
 
-    if args.archive is None:
-        # Avoid re-downloading videos that completed successfully during
-        # earlier client attempts in this invocation.
-        def match_filter(info_dict: dict) -> Optional[str]:
-            video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
-            if video_id:
-                record_video_detection(video_id)
-            if video_id and video_id in seen_ids:
-                return "Video already downloaded during previous client attempt"
-            return None
+    def match_filter(info_dict: dict) -> Optional[str]:
+        video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+        if video_id:
+            record_video_detection(video_id)
+        if video_id and video_id in seen_ids:
+            return "Video already downloaded previously (archive or current session)"
+        return None
 
-        extra_filters.append(match_filter)
+    extra_filters.append(match_filter)
 
     if target_video_ids:
 
@@ -1337,6 +1345,30 @@ def summarize_source_label(source: Source, display_url: str) -> str:
     return display_url
 
 
+def load_download_archive(path: str) -> Set[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return {
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+    except FileNotFoundError:
+        return set()
+
+
+def _append_to_download_archive(path: str, video_id: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    data = (video_id + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
 def download_source(source: Source, args) -> None:
     try:
         urls = source.build_download_urls(include_shorts=not args.no_shorts)
@@ -1366,7 +1398,23 @@ def download_source(source: Source, args) -> None:
         additional = [client for client in available_clients if client not in default_sequence]
         client_attempts = default_sequence + additional
 
+    archive_path = getattr(args, "archive", None)
+    archive_state: Optional[DownloadArchiveState] = None
     downloaded_ids: Set[str] = set()
+    if archive_path:
+        try:
+            existing_ids = load_download_archive(archive_path)
+        except OSError as exc:
+            print(f"Failed to read download archive {archive_path}: {exc}", file=sys.stderr)
+            existing_ids = set()
+        if existing_ids:
+            print(
+                f"Loaded {len(existing_ids)} previously downloaded video ID"
+                f"{'s' if len(existing_ids) != 1 else ''} from {archive_path}"
+            )
+        archive_state = DownloadArchiveState(path=archive_path, known_ids=set(existing_ids))
+        downloaded_ids = set(existing_ids)
+
     metadata_video_ids = collect_all_video_ids(urls, args, client_attempts[0] if client_attempts else None)
     if metadata_video_ids:
         print(
@@ -1404,6 +1452,7 @@ def download_source(source: Source, args) -> None:
             max_total,
             downloaded_ids,
             target_ids,
+            archive_state,
         )
         last_result = result
 
@@ -1638,6 +1687,11 @@ def main() -> int:
         return 1
 
     os.makedirs(args.output, exist_ok=True)
+
+    if not args.archive:
+        args.archive = os.path.join(args.output, ".download-archive.txt")
+    if args.archive:
+        print(f"Using download archive: {args.archive}")
 
     if args.channels_file:
         try:

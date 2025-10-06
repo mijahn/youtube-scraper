@@ -58,6 +58,7 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        download_archive=None,
     ):
         calls.append(
             {
@@ -113,6 +114,7 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        download_archive=None,
     ):
         calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
         if len(calls) == 1:
@@ -161,6 +163,7 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        download_archive=None,
     ):
         calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
         if len(calls) == 1:
@@ -207,6 +210,7 @@ def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys)
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        download_archive=None,
     ):
         return dc.DownloadAttempt(
             downloaded=2,
@@ -252,6 +256,7 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        download_archive=None,
     ):
         calls.append(client)
         if len(calls) == 1:
@@ -318,6 +323,7 @@ def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.Mon
         player_client="tv",
         max_total=None,
         downloaded_ids=set(),
+        download_archive=None,
     )
 
     assert attempt.downloaded == 0
@@ -362,6 +368,7 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
         player_client="web",
         max_total=None,
         downloaded_ids=set(),
+        download_archive=None,
     )
 
     assert attempt.downloaded == 0
