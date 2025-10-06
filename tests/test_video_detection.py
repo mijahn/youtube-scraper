@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
@@ -111,3 +112,28 @@ def test_download_source_summary_includes_metadata_count(
     match = re.search(r"Total videos detected:\s*(\d+)", cleaned)
     assert match
     assert match.group(1) == "3"
+
+
+def test_download_logger_extracts_video_id_from_error() -> None:
+    detected: set[str] = set()
+    failures: list[Optional[str]] = []
+
+    logger = dc.DownloadLogger(lambda vid: failures.append(vid))
+    logger.set_detection_callback(lambda vid: detected.add(vid))
+    logger.set_context("https://example.com", "web")
+
+    logger.error("ERROR: [youtube] abcdefghijk: This video is unavailable")
+
+    assert detected == {"abcdefghijk"}
+    assert failures[-1] == "abcdefghijk"
+    assert logger.video_unavailable_errors == 1
+
+
+def test_download_logger_handles_warning_failures() -> None:
+    failures: list[Optional[str]] = []
+    logger = dc.DownloadLogger(lambda vid: failures.append(vid))
+
+    logger.warning("WARNING: [youtube] ZYXWVUTSRQP: Sign in to confirm your age")
+
+    assert failures[-1] == "ZYXWVUTSRQP"
+    assert logger.video_unavailable_errors == 1
