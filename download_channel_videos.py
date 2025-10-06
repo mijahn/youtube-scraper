@@ -57,6 +57,7 @@ class DownloadLogger:
 
     UNAVAILABLE_FRAGMENTS = (
         "video unavailable",
+        "video is unavailable",
         "content isn't available",
         "content is not available",
         "channel members",
@@ -81,8 +82,12 @@ class DownloadLogger:
         "does not have a shorts tab",
     )
 
+    YOUTUBE_ID_PATTERN = re.compile(r"\[youtube[^\]]*\]\s+([0-9A-Za-z_-]{11})")
+
     def __init__(
-        self, failure_callback: Optional[Callable[[Optional[str]], None]] = None
+        self,
+        failure_callback: Optional[Callable[[Optional[str]], None]] = None,
+        detection_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
@@ -91,12 +96,18 @@ class DownloadLogger:
         self.current_video_id: Optional[str] = None
         self.retryable_error_ids: Set[str] = set()
         self._failure_callback = failure_callback
+        self._detection_callback = detection_callback
         self._last_reported_failure: Optional[Tuple[Optional[str], str]] = None
 
     def set_failure_callback(
         self, callback: Optional[Callable[[Optional[str]], None]]
     ) -> None:
         self._failure_callback = callback
+
+    def set_detection_callback(
+        self, callback: Optional[Callable[[str], None]]
+    ) -> None:
+        self._detection_callback = callback
 
     def set_context(
         self, url: Optional[str], client: Optional[str], video_id: Optional[str] = None
@@ -131,32 +142,42 @@ class DownloadLogger:
         if any(fragment in lowered for fragment in self.IGNORED_FRAGMENTS):
             return
 
+        parsed_video_id: Optional[str] = None
+        match = self.YOUTUBE_ID_PATTERN.search(text)
+        if match:
+            parsed_video_id = match.group(1)
+
+        video_id = self.current_video_id or parsed_video_id
+
+        if self._detection_callback and video_id:
+            self._detection_callback(video_id)
+
         is_retryable = any(
             fragment in lowered for fragment in self.RETRYABLE_FRAGMENTS
         )
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
-            key = (self.current_video_id, lowered)
+            key = (video_id, lowered)
             if key == self._last_reported_failure:
                 return
             self._last_reported_failure = key
             if self._failure_callback:
-                self._failure_callback(self.current_video_id)
+                self._failure_callback(video_id)
             return
 
-        key = (self.current_video_id, lowered)
+        key = (video_id, lowered)
         if key == self._last_reported_failure:
             return
 
         if is_retryable:
-            if self.current_video_id:
-                self.retryable_error_ids.add(self.current_video_id)
+            if video_id:
+                self.retryable_error_ids.add(video_id)
         else:
             self.other_errors += 1
 
         self._last_reported_failure = key
         if self._failure_callback:
-            self._failure_callback(self.current_video_id)
+            self._failure_callback(video_id)
 
     @staticmethod
     def _ensure_text(message) -> str:
@@ -171,7 +192,9 @@ class DownloadLogger:
         self._print(self._ensure_text(message))
 
     def warning(self, message) -> None:
-        self._print(self._ensure_text(message), file=sys.stderr)
+        text = self._ensure_text(message)
+        self._print(text, file=sys.stderr)
+        self._handle_message(text)
 
     def error(self, message) -> None:
         text = self._ensure_text(message)
@@ -1128,6 +1151,8 @@ def run_download_attempt(
         if not video_id:
             return
         detected_ids.add(video_id)
+
+    logger.set_detection_callback(record_video_detection)
 
     def describe_format_entry(entry: Optional[dict]) -> str:
         if not isinstance(entry, dict):
