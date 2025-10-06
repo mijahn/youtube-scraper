@@ -11,6 +11,7 @@ Supports:
 """
 
 import argparse
+import contextlib
 import os
 import sys
 import re
@@ -173,6 +174,7 @@ class DownloadLogger:
     def record_exception(self, exc: Exception) -> None:
         text = self._ensure_text(str(exc))
         self._print(text, file=sys.stderr)
+        self._last_reported_failure = None
         self._handle_message(text)
 
 
@@ -429,6 +431,105 @@ def parse_source_line(line: str) -> Optional[Source]:
 
     inferred_kind = infer_source_kind(stripped)
     return Source(inferred_kind, stripped)
+
+
+def _load_download_archive(path: Optional[str]) -> Set[str]:
+    if not path:
+        return set()
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            entries = set()
+            for raw_line in handle:
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                entries.add(stripped)
+            return entries
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        print(
+            f"Warning: Failed to read download archive {path}: {exc}",
+            file=sys.stderr,
+        )
+        return set()
+
+
+def _write_download_archive(path: Optional[str], video_ids: Iterable[str]) -> None:
+    if not path:
+        return
+
+    directory = os.path.dirname(path)
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"Warning: Failed to create directory for archive {path}: {exc}",
+                file=sys.stderr,
+            )
+            return
+
+    sanitized_ids = sorted(
+        {str(video_id).strip() for video_id in video_ids if str(video_id).strip()}
+    )
+    temp_path = f"{path}.tmp"
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            for video_id in sanitized_ids:
+                handle.write(f"{video_id}\n")
+        os.replace(temp_path, path)
+    except OSError as exc:
+        print(
+            f"Warning: Failed to update download archive {path}: {exc}",
+            file=sys.stderr,
+        )
+        with contextlib.suppress(OSError):
+            os.remove(temp_path)
+
+
+def _append_to_download_archive(path: Optional[str], video_id: Optional[str]) -> None:
+    if not path or not video_id:
+        return
+
+    sanitized = str(video_id).strip()
+    if not sanitized:
+        return
+
+    directory = os.path.dirname(path)
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:
+            print(
+                f"Warning: Failed to create directory for archive {path}: {exc}",
+                file=sys.stderr,
+            )
+            return
+
+    data = f"{sanitized}\n".encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as exc:
+        print(
+            f"Warning: Failed to open download archive {path}: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        os.write(fd, data)
+    except OSError as exc:
+        print(
+            f"Warning: Failed to append to download archive {path}: {exc}",
+            file=sys.stderr,
+        )
+    finally:
+        os.close(fd)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1165,6 +1266,7 @@ def run_download_attempt(
                 info_id = info.get("id")
             if info_id:
                 record_video_detection(info_id)
+                already_seen = info_id in seen_ids
                 seen_ids.add(info_id)
                 video_label = video_labels.get(info_id) or describe_video(info)
                 format_text = format_descriptions.get(info_id)
@@ -1176,6 +1278,8 @@ def run_download_attempt(
                 format_descriptions.pop(info_id, None)
                 video_labels.pop(info_id, None)
                 completed_ids.add(info_id)
+                if not already_seen:
+                    _append_to_download_archive(args.archive, info_id)
             downloaded += 1
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
@@ -1184,18 +1288,15 @@ def run_download_attempt(
 
     extra_filters: List[Callable[[dict], Optional[str]]] = []
 
-    if args.archive is None:
-        # Avoid re-downloading videos that completed successfully during
-        # earlier client attempts in this invocation.
-        def match_filter(info_dict: dict) -> Optional[str]:
-            video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
-            if video_id:
-                record_video_detection(video_id)
-            if video_id and video_id in seen_ids:
-                return "Video already downloaded during previous client attempt"
-            return None
+    def match_filter(info_dict: dict) -> Optional[str]:
+        video_id = info_dict.get("id") if isinstance(info_dict, dict) else None
+        if video_id:
+            record_video_detection(video_id)
+        if video_id and video_id in seen_ids:
+            return "Video already downloaded (tracked in archive or previous attempt)"
+        return None
 
-        extra_filters.append(match_filter)
+    extra_filters.append(match_filter)
 
     if target_video_ids:
 
@@ -1367,7 +1468,23 @@ def download_source(source: Source, args) -> None:
         additional = [client for client in available_clients if client not in default_sequence]
         client_attempts = default_sequence + additional
 
+    archive_path = getattr(args, "archive", None)
     downloaded_ids: Set[str] = set()
+    if archive_path:
+        previously_downloaded = _load_download_archive(archive_path)
+        downloaded_ids.update(previously_downloaded)
+        if os.path.exists(archive_path):
+            if previously_downloaded:
+                print(
+                    f"Found {len(previously_downloaded)} previously downloaded video"
+                    f"{'s' if len(previously_downloaded) != 1 else ''} in archive {archive_path}."
+                )
+            else:
+                print(f"Download archive {archive_path} is empty; starting fresh.")
+        else:
+            print(
+                f"No existing download archive at {archive_path}; it will be created after downloads."
+            )
     metadata_video_ids = collect_all_video_ids(urls, args, client_attempts[0] if client_attempts else None)
     if metadata_video_ids:
         print(
@@ -1382,6 +1499,7 @@ def download_source(source: Source, args) -> None:
     total_unavailable = 0
     total_other_errors = 0
     last_result: Optional[DownloadAttempt] = None
+    archive_updated = False
 
     total_client_attempts = len(client_attempts)
 
@@ -1429,6 +1547,9 @@ def download_source(source: Source, args) -> None:
             total_other_errors += result.other_errors
             detected_ids.update(result.detected_video_ids)
             downloaded_in_session.update(result.downloaded_video_ids)
+            if archive_path and result.downloaded_video_ids:
+                _write_download_archive(archive_path, downloaded_ids)
+                archive_updated = True
 
             print(
                 f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
@@ -1586,6 +1707,9 @@ def download_source(source: Source, args) -> None:
     total_downloaded_now = len(downloaded_in_session)
     total_pending = max(total_detected - total_downloaded_now, 0)
 
+    if archive_path and downloaded_in_session and not archive_updated:
+        _write_download_archive(archive_path, downloaded_ids)
+
     border_width = max(len(f" Summary for {summary_label} "), 36)
     border_color = "\033[95m"
     header_color = "\033[1;45;97m"
@@ -1701,6 +1825,11 @@ def watch_channels_file(path: str, args) -> None:
 def main() -> int:
     args = parse_args()
     apply_authentication_defaults(args)
+
+    if not args.archive:
+        args.archive = os.path.join(args.output, ".download-archive.txt")
+    if args.archive:
+        print(f"Using download archive: {args.archive}")
 
     if not args.url and not args.channels_file and not args.channels_url:
         print("Error: You must provide either --url, --channels-file, or --channels-url", file=sys.stderr)
