@@ -321,6 +321,7 @@ def _default_player_clients() -> Tuple[str, ...]:
 DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
 
 MAX_FAILURES_PER_CLIENT = 5
+MAX_ATTEMPTS_PER_CLIENT = 5
 
 
 @dataclass
@@ -1393,106 +1394,174 @@ def download_source(source: Source, args) -> None:
         print(header.center(len(border)))
         print(border)
 
+    stop_all_attempts = False
+
     for idx, client in enumerate(client_attempts):
-        target_ids = pending_retry_ids if pending_retry_ids else None
+        if stop_all_attempts:
+            break
+
         client_label = client if client else "default"
         print_client_switch_banner(idx + 1, client_label)
-        result = run_download_attempt(
-            urls,
-            args,
-            client,
-            max_total,
-            downloaded_ids,
-            target_ids,
-        )
-        last_result = result
 
-        total_downloaded += result.downloaded
-        total_unavailable += result.video_unavailable_errors
-        total_other_errors += result.other_errors
-        detected_ids.update(result.detected_video_ids)
-        downloaded_in_session.update(result.downloaded_video_ids)
+        attempts_for_client = 0
+        consecutive_failures = 0
 
-        print(
-            f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
-        )
-
-        if result.stopped_due_to_limit:
+        while (
+            attempts_for_client < MAX_ATTEMPTS_PER_CLIENT
+            and consecutive_failures < MAX_ATTEMPTS_PER_CLIENT
+        ):
+            target_ids = pending_retry_ids if pending_retry_ids else None
+            result = run_download_attempt(
+                urls,
+                args,
+                client,
+                max_total,
+                downloaded_ids,
+                target_ids,
+            )
             pending_retry_ids = None
-            break
+            last_result = result
 
-        next_client_available = idx < len(client_attempts) - 1
+            attempts_for_client += 1
 
-        if result.failure_limit_reached:
-            pending_retry_ids = None
-            if next_client_available:
+            total_downloaded += result.downloaded
+            total_unavailable += result.video_unavailable_errors
+            total_other_errors += result.other_errors
+            detected_ids.update(result.detected_video_ids)
+            downloaded_in_session.update(result.downloaded_video_ids)
+
+            print(
+                f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
+            )
+
+            only_unavailable_failures = (
+                result.downloaded == 0
+                and result.video_unavailable_errors > 0
+                and result.other_errors == 0
+            )
+            attempt_failed = (
+                result.failure_limit_reached
+                or result.downloaded == 0
+                or only_unavailable_failures
+            )
+
+            if attempt_failed:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            if result.stopped_due_to_limit:
+                stop_all_attempts = True
+                break
+
+            next_client_available = idx < len(client_attempts) - 1
+            should_switch_client = False
+
+            if result.failure_limit_reached:
+                if next_client_available:
+                    next_client = client_attempts[idx + 1]
+                    print(
+                        "\nReached the maximum of"
+                        f" {MAX_FAILURES_PER_CLIENT} failed downloads with the"
+                        f" {client!r} client. Trying {next_client!r} next..."
+                    )
+                    should_switch_client = True
+                else:
+                    print(
+                        "\nReached the maximum number of failed downloads and no"
+                        f" additional clients are available after {client!r}."
+                    )
+                    stop_all_attempts = True
+                break
+
+            if result.retryable_error_ids:
+                if next_client_available:
+                    pending_retry_ids = set(result.retryable_error_ids)
+                    next_client = client_attempts[idx + 1]
+                    retry_count = len(pending_retry_ids)
+                    plural = "video" if retry_count == 1 else "videos"
+                    print(
+                        "\nEncountered retryable HTTP 403 errors using the"
+                        f" {client!r} client. Retrying {retry_count} {plural} with"
+                        f" {next_client!r}..."
+                    )
+                    should_switch_client = True
+                else:
+                    print(
+                        "\nEncountered retryable HTTP 403 errors but no additional"
+                        f" clients are available after the {client!r} client."
+                    )
+                    stop_all_attempts = True
+                break
+
+            if not next_client_available:
+                stop_all_attempts = True
+                break
+
+            if result.other_errors > 0:
                 next_client = client_attempts[idx + 1]
+                plural = "error" if result.other_errors == 1 else "errors"
                 print(
-                    "\nReached the maximum of"
-                    f" {MAX_FAILURES_PER_CLIENT} failed downloads with the"
+                    "\nEncountered"
+                    f" {result.other_errors} download {plural} using the"
                     f" {client!r} client. Trying {next_client!r} next..."
                 )
-                continue
-            print(
-                "\nReached the maximum number of failed downloads and no"
-                f" additional clients are available after {client!r}."
-            )
-            break
-
-        if result.retryable_error_ids:
-            if next_client_available:
-                pending_retry_ids = set(result.retryable_error_ids)
+                should_switch_client = True
+            elif result.video_unavailable_errors > 0:
                 next_client = client_attempts[idx + 1]
-                retry_count = len(pending_retry_ids)
-                plural = "video" if retry_count == 1 else "videos"
+                plural = "error" if result.video_unavailable_errors == 1 else "errors"
                 print(
-                    "\nEncountered retryable HTTP 403 errors using the"
-                    f" {client!r} client. Retrying {retry_count} {plural} with"
-                    f" {next_client!r}..."
+                    "\nEncountered"
+                    f" {result.video_unavailable_errors} 'Video unavailable' {plural} using the"
+                    f" {client!r} client. Retrying with {next_client!r}..."
                 )
-                continue
-            pending_retry_ids = None
-            print(
-                "\nEncountered retryable HTTP 403 errors but no additional"
-                f" clients are available after the {client!r} client."
+                should_switch_client = True
+            elif result.downloaded == 0:
+                if attempts_for_client < MAX_ATTEMPTS_PER_CLIENT:
+                    next_attempt = attempts_for_client + 1
+                    print(
+                        "\nNo videos were downloaded using the"
+                        f" {client!r} client. Retrying attempt"
+                        f" {next_attempt} of {MAX_ATTEMPTS_PER_CLIENT}..."
+                    )
+                # stay on current client until the limit is reached
+            else:
+                stop_all_attempts = True
+                break
+
+            threshold_reached = (
+                attempts_for_client >= MAX_ATTEMPTS_PER_CLIENT
+                or consecutive_failures >= MAX_ATTEMPTS_PER_CLIENT
             )
-            break
 
-        if not next_client_available:
-            pending_retry_ids = None
-            break
+            if threshold_reached and not should_switch_client:
+                if consecutive_failures >= MAX_ATTEMPTS_PER_CLIENT:
+                    reason = "5 consecutive failed attempts"
+                else:
+                    reason = "5 attempts"
 
-        pending_retry_ids = None
+                if next_client_available:
+                    next_client = client_attempts[idx + 1]
+                    print(
+                        "\nReached"
+                        f" {reason} with the {client!r} client. Trying {next_client!r} next..."
+                    )
+                    should_switch_client = True
+                else:
+                    print(
+                        "\nReached"
+                        f" {reason} with the {client!r} client and no additional"
+                        " clients are available."
+                    )
+                    stop_all_attempts = True
 
-        if result.other_errors > 0:
-            next_client = client_attempts[idx + 1]
-            plural = "error" if result.other_errors == 1 else "errors"
-            print(
-                "\nEncountered"
-                f" {result.other_errors} download {plural} using the"
-                f" {client!r} client. Trying {next_client!r} next..."
-            )
-            continue
+            if stop_all_attempts:
+                break
 
-        if result.video_unavailable_errors > 0:
-            next_client = client_attempts[idx + 1]
-            plural = "error" if result.video_unavailable_errors == 1 else "errors"
-            print(
-                "\nEncountered"
-                f" {result.video_unavailable_errors} 'Video unavailable' {plural} using the"
-                f" {client!r} client. Retrying with {next_client!r}..."
-            )
-            continue
+            if should_switch_client:
+                break
 
-        if result.downloaded == 0:
-            next_client = client_attempts[idx + 1]
-            print(
-                "\nNo videos were downloaded using the"
-                f" {client!r} client. Trying {next_client!r} next..."
-            )
-            continue
-
-        break
+            # Otherwise, loop again with the same client.
 
     if (
         not args.allow_restricted

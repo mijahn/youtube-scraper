@@ -280,6 +280,54 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
     assert calls[1] == fallback_order[0]
 
 
+def test_download_source_limits_attempts_per_client(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    args = make_args()
+
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+
+    calls = []
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+    ):
+        calls.append(client)
+        if client == "tv":
+            return dc.DownloadAttempt(
+                downloaded=0,
+                video_unavailable_errors=0,
+                other_errors=0,
+                retryable_error_ids=set(),
+                stopped_due_to_limit=False,
+            )
+        return dc.DownloadAttempt(
+            downloaded=1,
+            video_unavailable_errors=0,
+            other_errors=0,
+            retryable_error_ids=set(),
+            stopped_due_to_limit=False,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    captured = capsys.readouterr()
+
+    assert len(calls) == dc.MAX_ATTEMPTS_PER_CLIENT + 1
+    assert calls[: dc.MAX_ATTEMPTS_PER_CLIENT] == ["tv"] * dc.MAX_ATTEMPTS_PER_CLIENT
+    assert calls.count("tv") == dc.MAX_ATTEMPTS_PER_CLIENT
+    assert calls[dc.MAX_ATTEMPTS_PER_CLIENT] == "web_safari"
+    assert "5 consecutive failed attempts" in captured.out
+
+
 def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     args = make_args()
 
