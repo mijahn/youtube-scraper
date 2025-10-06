@@ -47,7 +47,9 @@ class DownloadAttempt:
     retryable_error_ids: Set[str] = field(default_factory=set)
     stopped_due_to_limit: bool = False
     failure_count: int = 0
+    total_failure_count: int = 0
     failure_limit_reached: bool = False
+    consecutive_limit_reached: bool = False
 
 
 class DownloadLogger:
@@ -134,7 +136,12 @@ class DownloadLogger:
         )
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
-            self._last_reported_failure = None
+            key = (self.current_video_id, lowered)
+            if key == self._last_reported_failure:
+                return
+            self._last_reported_failure = key
+            if self._failure_callback:
+                self._failure_callback(self.current_video_id)
             return
 
         key = (self.current_video_id, lowered)
@@ -1098,7 +1105,10 @@ def run_download_attempt(
     downloaded = 0
     stopped_due_to_limit = False
     failure_limit_reached = False
-    failure_events = 0
+    consecutive_limit_reached = False
+    total_failures = 0
+    consecutive_failures = 0
+    failure_limit_reason: Optional[str] = None
     seen_ids: Set[str]
     if downloaded_ids is not None:
         seen_ids = downloaded_ids
@@ -1196,22 +1206,42 @@ def run_download_attempt(
     def register_failure(
         failed_video_id: Optional[str], *, interrupt: bool
     ) -> None:
-        nonlocal failure_limit_reached, failure_events
+        nonlocal failure_limit_reached
+        nonlocal consecutive_limit_reached
+        nonlocal total_failures
+        nonlocal consecutive_failures
+        nonlocal failure_limit_reason
         if failure_limit_reached:
             return
         if failed_video_id and failed_video_id in completed_ids:
             return
 
-        failure_events += 1
+        total_failures += 1
+        consecutive_failures += 1
         if failed_video_id:
             failed_video_ids.add(failed_video_id)
 
-        failure_total = failure_events
-        if failure_total >= MAX_FAILURES_PER_CLIENT:
+        limit_reason: Optional[str] = None
+        if consecutive_failures >= MAX_FAILURES_PER_CLIENT:
+            consecutive_limit_reached = True
+            limit_reason = "consecutive"
+        elif total_failures >= MAX_FAILURES_PER_CLIENT:
+            limit_reason = "total"
+
+        if limit_reason:
             failure_limit_reached = True
+            failure_limit_reason = limit_reason
             if interrupt:
+                if limit_reason == "consecutive":
+                    raise DownloadCancelled(
+                        (
+                            f"Aborting client {client_label} after "
+                            f"{consecutive_failures} consecutive download failures "
+                            f"(total failures: {total_failures})"
+                        )
+                    )
                 raise DownloadCancelled(
-                    f"Aborting client {client_label} after {failure_total} download failures"
+                    f"Aborting client {client_label} after {total_failures} total download failures"
                 )
 
     logger.set_failure_callback(
@@ -1219,7 +1249,7 @@ def run_download_attempt(
     )
 
     def hook(d):
-        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached
+        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached, consecutive_failures
         status = d.get("status")
         info = d.get("info_dict")
         video_id = info.get("id") if isinstance(info, dict) else None
@@ -1285,6 +1315,7 @@ def run_download_attempt(
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
             logger.set_video(None)
+            consecutive_failures = 0
 
     extra_filters: List[Callable[[dict], Optional[str]]] = []
 
@@ -1324,7 +1355,7 @@ def run_download_attempt(
                 before_downloaded = downloaded
                 before_unavailable = logger.video_unavailable_errors
                 before_other = logger.other_errors
-                before_failures = failure_events
+                before_total_failures = total_failures
                 encountered_exception = False
 
                 try:
@@ -1345,26 +1376,42 @@ def run_download_attempt(
                     after_downloaded = downloaded
                     after_unavailable = logger.video_unavailable_errors
                     after_other = logger.other_errors
-                    after_failures = failure_events
+                    after_total_failures = total_failures
+                    after_consecutive = consecutive_failures
 
                     delta_downloaded = after_downloaded - before_downloaded
                     delta_unavailable = after_unavailable - before_unavailable
                     delta_other = after_other - before_other
-                    delta_failures = after_failures - before_failures
+                    delta_total_failures = after_total_failures - before_total_failures
 
                     summary_parts = [f"{delta_downloaded} downloaded"]
                     if delta_unavailable:
                         summary_parts.append(f"{delta_unavailable} unavailable")
                     if delta_other:
                         summary_parts.append(f"{delta_other} other errors")
-                    if delta_failures:
-                        summary_parts.append(f"{delta_failures} failures")
-                    if not delta_unavailable and not delta_other and not delta_failures:
+                    if delta_total_failures:
+                        summary_parts.append(
+                            f"{delta_total_failures} failures"
+                            f" (total={after_total_failures}, consecutive={after_consecutive})"
+                        )
+                    if (
+                        not delta_unavailable
+                        and not delta_other
+                        and not delta_total_failures
+                    ):
                         summary_parts.append("no new errors")
                     if encountered_exception and not (delta_unavailable or delta_other):
                         summary_parts.append("see logs for details")
                     if stopped_due_to_limit:
                         summary_parts.append("stopped due to limit")
+                    if (
+                        failure_limit_reached
+                        and consecutive_limit_reached
+                        and failure_limit_reason == "consecutive"
+                    ):
+                        summary_parts.append("consecutive failure limit reached")
+                    elif failure_limit_reached and failure_limit_reason == "total":
+                        summary_parts.append("total failure limit reached")
 
                     print(
                         f"{context_prefix()}URL summary: {u} -> {', '.join(summary_parts)}"
@@ -1396,8 +1443,10 @@ def run_download_attempt(
         downloaded_video_ids=set(completed_ids),
         retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
-        failure_count=failure_events,
+        failure_count=consecutive_failures,
+        total_failure_count=total_failures,
         failure_limit_reached=failure_limit_reached,
+        consecutive_limit_reached=consecutive_limit_reached,
     )
 
 
@@ -1409,8 +1458,15 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append(f"{attempt.other_errors} other errors")
     if attempt.retryable_error_ids:
         parts.append(f"{len(attempt.retryable_error_ids)} retryable")
+    if attempt.total_failure_count:
+        parts.append(f"{attempt.total_failure_count} total failures")
     if attempt.failure_count:
-        parts.append(f"{attempt.failure_count} failures")
+        if attempt.consecutive_limit_reached:
+            parts.append(
+                f"{attempt.failure_count} consecutive failures (limit reached)"
+            )
+        else:
+            parts.append(f"{attempt.failure_count} consecutive failures")
     if attempt.stopped_due_to_limit:
         parts.append("stopped due to limit")
     if attempt.failure_limit_reached:
@@ -1579,18 +1635,24 @@ def download_source(source: Source, args) -> None:
             should_switch_client = False
 
             if result.failure_limit_reached:
+                limit_label = (
+                    "consecutive failed downloads"
+                    if result.consecutive_limit_reached
+                    else "failed downloads"
+                )
                 if next_client_available:
                     next_client = client_attempts[idx + 1]
                     print(
                         "\nReached the maximum of"
-                        f" {MAX_FAILURES_PER_CLIENT} failed downloads with the"
+                        f" {MAX_FAILURES_PER_CLIENT} {limit_label} with the"
                         f" {client!r} client. Trying {next_client!r} next..."
                     )
                     should_switch_client = True
                 else:
                     print(
-                        "\nReached the maximum number of failed downloads and no"
-                        f" additional clients are available after {client!r}."
+                        "\nReached the maximum number of"
+                        f" {limit_label} and no additional clients are available"
+                        f" after {client!r}."
                     )
                     stop_all_attempts = True
                 break
