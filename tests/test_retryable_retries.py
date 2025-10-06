@@ -328,7 +328,9 @@ def test_download_source_limits_attempts_per_client(monkeypatch: pytest.MonkeyPa
     assert "5 consecutive failed attempts" in captured.out
 
 
-def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_download_attempt_respects_failure_threshold(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     args = make_args()
 
     class FakeYoutubeDL:
@@ -371,11 +373,16 @@ def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.Mon
     assert attempt.downloaded == 0
     assert attempt.failure_limit_reached is True
     assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.consecutive_limit_reached is True
     assert "video-1" in attempt.retryable_error_ids
+
+    output = capsys.readouterr().out
+    assert "consecutive failure limit reached" in output
 
 
 def test_run_download_attempt_logger_errors_trigger_failure_limit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     args = make_args()
 
@@ -416,4 +423,145 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
     assert attempt.other_errors == dc.MAX_FAILURES_PER_CLIENT
     assert attempt.failure_limit_reached is True
     assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.consecutive_limit_reached is True
     assert not attempt.retryable_error_ids
+
+    output = capsys.readouterr().out
+    assert "consecutive failure limit reached" in output
+
+
+def test_run_download_attempt_consecutive_resets_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            assert hooks, "Expected at least one progress hook"
+            hook = hooks[0]
+            logger = self.params.get("logger")
+            assert isinstance(logger, dc.DownloadLogger)
+
+            info1 = {"id": "video-1", "title": "Example 1"}
+            fail_payload = {
+                "status": "error",
+                "info_dict": info1,
+                "error": "HTTP Error 403: Forbidden",
+            }
+            finish_payload = {"status": "finished", "info_dict": info1}
+
+            try:
+                hook(dict(fail_payload))
+            except dc.DownloadCancelled:
+                pytest.fail("failure limit triggered unexpectedly")
+
+            hook(dict(finish_payload))
+
+            info2 = {"id": "video-2", "title": "Example 2"}
+            logger.set_video("video-2")
+            try:
+                logger.error("This video is private")
+            finally:
+                logger.set_video(None)
+
+            hook({"status": "finished", "info_dict": info2})
+
+            info3 = {"id": "video-3", "title": "Example 3"}
+            try:
+                hook(
+                    {
+                        "status": "error",
+                        "info_dict": info3,
+                        "error": "HTTP Error 403: Forbidden",
+                    }
+                )
+            except dc.DownloadCancelled:
+                pytest.fail("consecutive failures should have reset after success")
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="tv",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == 2
+    assert attempt.video_unavailable_errors == 1
+    assert attempt.total_failure_count == 3
+    assert attempt.failure_count == 1
+    assert attempt.failure_limit_reached is False
+    assert attempt.consecutive_limit_reached is False
+
+
+def test_run_download_attempt_total_limit_without_consecutive_streak(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    args = make_args()
+    monkeypatch.setattr(dc, "MAX_FAILURES_PER_CLIENT", 3)
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            assert hooks, "Expected at least one progress hook"
+            hook = hooks[0]
+
+            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+                video_id = f"video-{idx}"
+                info = {"id": video_id, "title": f"Example {idx}"}
+                error_payload = {
+                    "status": "error",
+                    "info_dict": info,
+                    "error": "HTTP Error 403: Forbidden",
+                }
+                try:
+                    hook(dict(error_payload))
+                except dc.DownloadCancelled:
+                    if idx != dc.MAX_FAILURES_PER_CLIENT - 1:
+                        pytest.fail("failure limit triggered before total cap")
+                    raise
+
+                if idx < dc.MAX_FAILURES_PER_CLIENT - 1:
+                    hook({"status": "finished", "info_dict": info})
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="tv",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.failure_limit_reached is True
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_count == 1
+    assert attempt.consecutive_limit_reached is False
+
+    output = capsys.readouterr().out
+    assert "total failure limit reached" in output
