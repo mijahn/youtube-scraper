@@ -322,7 +322,9 @@ def test_run_download_attempt_respects_failure_threshold(monkeypatch: pytest.Mon
 
     assert attempt.downloaded == 0
     assert attempt.failure_limit_reached is True
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
     assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.consecutive_limit_reached is True
     assert "video-1" in attempt.retryable_error_ids
 
 
@@ -367,5 +369,188 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
     assert attempt.downloaded == 0
     assert attempt.other_errors == dc.MAX_FAILURES_PER_CLIENT
     assert attempt.failure_limit_reached is True
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
     assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.consecutive_limit_reached is True
     assert not attempt.retryable_error_ids
+
+
+def test_run_download_attempt_resets_consecutive_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            logger = self.params.get("logger")
+            assert hooks and isinstance(logger, dc.DownloadLogger)
+            hook = hooks[0]
+
+            events = [
+                {
+                    "status": "error",
+                    "info_dict": {"id": "video-1", "title": "First"},
+                    "error": "HTTP Error 403: Forbidden",
+                },
+                {
+                    "status": "finished",
+                    "info_dict": {"id": "video-1", "title": "First"},
+                },
+                {
+                    "status": "error",
+                    "info_dict": {"id": "video-2", "title": "Second"},
+                    "error": "This video is private",
+                },
+                {
+                    "status": "finished",
+                    "info_dict": {"id": "video-2", "title": "Second"},
+                },
+            ]
+
+            for payload in events:
+                try:
+                    hook(dict(payload))
+                except dc.DownloadCancelled:
+                    pytest.fail("Download should not have been cancelled")
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="web",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == 2
+    assert attempt.video_unavailable_errors == 1
+    assert attempt.total_failure_count == 2
+    assert attempt.failure_count == 0
+    assert attempt.consecutive_limit_reached is False
+    assert attempt.failure_limit_reached is False
+    assert attempt.retryable_error_ids == {"video-1"}
+
+
+def test_run_download_attempt_unavailable_consecutive_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            assert hooks, "Expected at least one progress hook"
+            hook = hooks[0]
+
+            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+                info = {"id": f"video-{idx}", "title": f"Video {idx}"}
+                payload = {
+                    "status": "error",
+                    "info_dict": info,
+                    "error": "This video is private",
+                }
+                hook(dict(payload))
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="ios",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == 0
+    assert attempt.video_unavailable_errors == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.consecutive_limit_reached is True
+    assert attempt.failure_limit_reached is True
+
+
+def test_run_download_attempt_total_limit_without_consecutive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = make_args()
+
+    class FakeYoutubeDL:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            assert urls == ["https://www.youtube.com/watch?v=example"]
+            hooks = self.params.get("progress_hooks") or []
+            assert hooks, "Expected at least one progress hook"
+            hook = hooks[0]
+
+            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+                info = {"id": f"fail-{idx}", "title": f"Fail {idx}"}
+                payload = {
+                    "status": "error",
+                    "info_dict": info,
+                    "error": "HTTP Error 403: Forbidden",
+                }
+                try:
+                    hook(dict(payload))
+                except dc.DownloadCancelled:
+                    if idx != dc.MAX_FAILURES_PER_CLIENT - 1:
+                        pytest.fail("Total failure limit triggered too early")
+                    raise
+
+                if idx < dc.MAX_FAILURES_PER_CLIENT - 1:
+                    success_info = {
+                        "id": f"success-{idx}",
+                        "title": f"Success {idx}",
+                    }
+                    hook(
+                        {
+                            "status": "finished",
+                            "info_dict": success_info,
+                        }
+                    )
+
+    monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    attempt = dc.run_download_attempt(
+        ["https://www.youtube.com/watch?v=example"],
+        args,
+        player_client="tv_html5",
+        max_total=None,
+        downloaded_ids=set(),
+    )
+
+    assert attempt.downloaded == dc.MAX_FAILURES_PER_CLIENT - 1
+    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_count == 1
+    assert attempt.consecutive_limit_reached is False
+    assert attempt.failure_limit_reached is True
+    assert attempt.retryable_error_ids == {f"fail-{idx}" for idx in range(dc.MAX_FAILURES_PER_CLIENT)}

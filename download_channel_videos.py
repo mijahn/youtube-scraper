@@ -41,12 +41,14 @@ class DownloadAttempt:
     downloaded: int
     video_unavailable_errors: int
     other_errors: int
+    total_failure_count: int = 0
     detected_video_ids: Set[str] = field(default_factory=set)
     downloaded_video_ids: Set[str] = field(default_factory=set)
     retryable_error_ids: Set[str] = field(default_factory=set)
     stopped_due_to_limit: bool = False
     failure_count: int = 0
     failure_limit_reached: bool = False
+    consecutive_limit_reached: bool = False
 
 
 class DownloadLogger:
@@ -134,10 +136,12 @@ class DownloadLogger:
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
             self._last_reported_failure = None
+            if self._failure_callback:
+                self._failure_callback(self.current_video_id)
             return
 
         key = (self.current_video_id, lowered)
-        if key == self._last_reported_failure:
+        if self.current_video_id is not None and key == self._last_reported_failure:
             return
 
         if is_retryable:
@@ -146,7 +150,10 @@ class DownloadLogger:
         else:
             self.other_errors += 1
 
-        self._last_reported_failure = key
+        if self.current_video_id is not None:
+            self._last_reported_failure = key
+        else:
+            self._last_reported_failure = None
         if self._failure_callback:
             self._failure_callback(self.current_video_id)
 
@@ -996,7 +1003,9 @@ def run_download_attempt(
     downloaded = 0
     stopped_due_to_limit = False
     failure_limit_reached = False
-    failure_events = 0
+    total_failures = 0
+    consecutive_failures = 0
+    consecutive_limit_reached = False
     seen_ids: Set[str]
     if downloaded_ids is not None:
         seen_ids = downloaded_ids
@@ -1093,31 +1102,52 @@ def run_download_attempt(
 
     def register_failure(
         failed_video_id: Optional[str], *, interrupt: bool
-    ) -> None:
-        nonlocal failure_limit_reached, failure_events
-        if failure_limit_reached:
-            return
-        if failed_video_id and failed_video_id in completed_ids:
-            return
+    ) -> Optional[str]:
+        nonlocal failure_limit_reached, total_failures, consecutive_failures, consecutive_limit_reached
 
-        failure_events += 1
+        if failure_limit_reached:
+            return None
+        if failed_video_id and failed_video_id in completed_ids:
+            return None
+
+        total_failures += 1
+        consecutive_failures += 1
+
         if failed_video_id:
             failed_video_ids.add(failed_video_id)
 
-        failure_total = failure_events
-        if failure_total >= MAX_FAILURES_PER_CLIENT:
+        reached_consecutive_limit = (
+            consecutive_failures >= MAX_FAILURES_PER_CLIENT
+        )
+        reached_total_limit = total_failures >= MAX_FAILURES_PER_CLIENT
+
+        limit_message: Optional[str] = None
+        if reached_consecutive_limit:
+            consecutive_limit_reached = True
+
+        if reached_total_limit or reached_consecutive_limit:
             failure_limit_reached = True
-            if interrupt:
-                raise DownloadCancelled(
-                    f"Aborting client {client_label} after {failure_total} download failures"
+            if reached_consecutive_limit:
+                limit_message = (
+                    f"Aborting client {client_label} after"
+                    f" {MAX_FAILURES_PER_CLIENT} consecutive download failures"
                 )
+            else:
+                limit_message = (
+                    f"Aborting client {client_label} after"
+                    f" {MAX_FAILURES_PER_CLIENT} download failures"
+                )
+            if interrupt:
+                raise DownloadCancelled(limit_message)
+
+        return limit_message
 
     logger.set_failure_callback(
         lambda video_id: register_failure(video_id, interrupt=True)
     )
 
     def hook(d):
-        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached
+        nonlocal downloaded, stopped_due_to_limit, failure_limit_reached, consecutive_failures
         status = d.get("status")
         info = d.get("info_dict")
         video_id = info.get("id") if isinstance(info, dict) else None
@@ -1176,6 +1206,7 @@ def run_download_attempt(
                 video_labels.pop(info_id, None)
                 completed_ids.add(info_id)
             downloaded += 1
+            consecutive_failures = 0
             if max_total and downloaded >= max_total:
                 stopped_due_to_limit = True
                 raise KeyboardInterrupt
@@ -1222,28 +1253,35 @@ def run_download_attempt(
                 before_downloaded = downloaded
                 before_unavailable = logger.video_unavailable_errors
                 before_other = logger.other_errors
-                before_failures = failure_events
+                before_failures = total_failures
                 encountered_exception = False
 
                 try:
                     ydl.download([u])
-                except DownloadCancelled:
+                except DownloadCancelled as exc:
                     encountered_exception = True
-                    register_failure(None, interrupt=False)
-                    # Failure threshold reached; no need to log extra noise.
+                    limit_message: Optional[str] = None
+                    if not failure_limit_reached:
+                        limit_message = register_failure(None, interrupt=False)
+                    raise DownloadCancelled(limit_message) if limit_message else exc
                 except (DownloadError, ExtractorError) as exc:
                     encountered_exception = True
-                    register_failure(None, interrupt=False)
                     logger.record_exception(exc)
+                    limit_message = register_failure(None, interrupt=False)
+                    if limit_message:
+                        raise DownloadCancelled(limit_message)
                 except Exception as exc:  # pragma: no cover - defensive safety net
                     encountered_exception = True
-                    register_failure(None, interrupt=False)
                     logger.record_exception(exc)
+                    limit_message = register_failure(None, interrupt=False)
+                    if limit_message:
+                        raise DownloadCancelled(limit_message)
                 finally:
                     after_downloaded = downloaded
                     after_unavailable = logger.video_unavailable_errors
                     after_other = logger.other_errors
-                    after_failures = failure_events
+                    after_failures = total_failures
+                    after_consecutive = consecutive_failures
 
                     delta_downloaded = after_downloaded - before_downloaded
                     delta_unavailable = after_unavailable - before_unavailable
@@ -1256,13 +1294,21 @@ def run_download_attempt(
                     if delta_other:
                         summary_parts.append(f"{delta_other} other errors")
                     if delta_failures:
-                        summary_parts.append(f"{delta_failures} failures")
+                        summary_parts.append(
+                            f"{delta_failures} failures"
+                            f" (total={after_failures}, consecutive={after_consecutive})"
+                        )
                     if not delta_unavailable and not delta_other and not delta_failures:
                         summary_parts.append("no new errors")
                     if encountered_exception and not (delta_unavailable or delta_other):
                         summary_parts.append("see logs for details")
                     if stopped_due_to_limit:
                         summary_parts.append("stopped due to limit")
+                    if failure_limit_reached:
+                        if consecutive_limit_reached:
+                            summary_parts.append("consecutive failure limit reached")
+                        else:
+                            summary_parts.append("total failure limit reached")
 
                     print(
                         f"{context_prefix()}URL summary: {u} -> {', '.join(summary_parts)}"
@@ -1276,8 +1322,6 @@ def run_download_attempt(
                 if failure_limit_reached:
                     break
 
-            logger.set_context(None, None)
-            logger.set_video(None)
     except KeyboardInterrupt:
         if stopped_due_to_limit:
             print("\nReached max download limit for this source; stopping.")
@@ -1285,17 +1329,22 @@ def run_download_attempt(
             raise
     except DownloadCancelled:
         failure_limit_reached = True
+    finally:
+        logger.set_context(None, None)
+        logger.set_video(None)
 
     return DownloadAttempt(
         downloaded=downloaded,
         video_unavailable_errors=logger.video_unavailable_errors,
         other_errors=logger.other_errors,
+        total_failure_count=total_failures,
         detected_video_ids=set(detected_ids),
         downloaded_video_ids=set(completed_ids),
         retryable_error_ids=set(logger.retryable_error_ids),
         stopped_due_to_limit=stopped_due_to_limit,
-        failure_count=failure_events,
+        failure_count=consecutive_failures,
         failure_limit_reached=failure_limit_reached,
+        consecutive_limit_reached=consecutive_limit_reached,
     )
 
 
@@ -1307,14 +1356,21 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append(f"{attempt.other_errors} other errors")
     if attempt.retryable_error_ids:
         parts.append(f"{len(attempt.retryable_error_ids)} retryable")
+    if attempt.total_failure_count:
+        parts.append(f"{attempt.total_failure_count} total failures")
     if attempt.failure_count:
-        parts.append(f"{attempt.failure_count} failures")
+        parts.append(f"{attempt.failure_count} consecutive failures")
     if attempt.stopped_due_to_limit:
         parts.append("stopped due to limit")
     if attempt.failure_limit_reached:
-        parts.append(
-            f"reached failure limit ({MAX_FAILURES_PER_CLIENT})"
-        )
+        if attempt.consecutive_limit_reached:
+            parts.append(
+                f"reached consecutive failure limit ({MAX_FAILURES_PER_CLIENT})"
+            )
+        else:
+            parts.append(
+                f"reached failure limit ({MAX_FAILURES_PER_CLIENT})"
+            )
     return ", ".join(parts)
 
 
@@ -1427,9 +1483,13 @@ def download_source(source: Source, args) -> None:
             pending_retry_ids = None
             if next_client_available:
                 next_client = client_attempts[idx + 1]
+                if result.consecutive_limit_reached:
+                    limit_phrase = "consecutive failed downloads"
+                else:
+                    limit_phrase = "failed downloads"
                 print(
                     "\nReached the maximum of"
-                    f" {MAX_FAILURES_PER_CLIENT} failed downloads with the"
+                    f" {MAX_FAILURES_PER_CLIENT} {limit_phrase} with the"
                     f" {client!r} client. Trying {next_client!r} next..."
                 )
                 continue
