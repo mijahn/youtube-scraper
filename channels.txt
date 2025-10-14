@@ -24,6 +24,7 @@ channel: https://www.youtube.com/@TheDiaryOfACEO
 channel: https://www.youtube.com/@TED
 channel: https://www.youtube.com/@ChrisWillx
 channel: https://www.youtube.com/@TEDx
+channel: https://www.youtube.com/@OBRosewell
 
 # lists
 playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
