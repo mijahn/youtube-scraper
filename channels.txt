@@ -22,6 +22,8 @@ channel: https://www.youtube.com/@howiaipodcast
 channel: https://www.youtube.com/@LennysPodcast
 channel: https://www.youtube.com/@TheDiaryOfACEO
 channel: https://www.youtube.com/@TED
+channel: https://www.youtube.com/@ChrisWillx
+channel: https://www.youtube.com/@TEDx
 
 # lists
 playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRdcA
