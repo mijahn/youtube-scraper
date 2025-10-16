@@ -87,6 +87,32 @@ The downloader now automatically retries with different YouTube player clients w
   CLIENT.CONTEXT+TOKEN` when integrating an external provider.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
 
+### Interactive menu for scanning & downloads
+
+Prefer a guided workflow instead of calling `download_channel_videos.py` directly? The `interactive_interface.py` helper
+wraps the downloader and exposes three menu options:
+
+1. **Check for new videos** – scans every entry in your `channels.txt`, highlights sources you recently added, and shows how
+   many videos are already archived versus still pending.
+2. **Download videos from a specific source** – lists each source with its pending count, then triggers downloads for the one
+   you pick using the same flags you would pass to `download_channel_videos.py`.
+3. **Download all pending videos** – combines the previous two options by scanning first and then downloading everything that
+   has not been archived yet.
+
+Run the interface with the same arguments you normally pass to the downloader, for example:
+
+```bash
+python interactive_interface.py \
+  --channels-file channels.txt \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
+  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --cookies-from-browser chrome
+```
+
+All command-line flags accepted by `download_channel_videos.py` are also supported here, so existing workflows continue to
+work while adding a quick way to inspect channel state or focus on a single source without remembering the specific yt-dlp
+commands.
+
 ### Preserving original formats
 
 The downloader now relies on yt-dlp's native format selection so videos are saved in whatever container YouTube provides.
