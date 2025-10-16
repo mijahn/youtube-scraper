@@ -47,7 +47,7 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     calls = []
 
@@ -102,7 +102,7 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     calls = []
 
@@ -150,7 +150,7 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     calls = []
 
@@ -198,7 +198,15 @@ def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys)
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: {"vid1", "vid2", "vid3"})
+    monkeypatch.setattr(
+        dc,
+        "collect_all_video_ids",
+        lambda *a, **k: [
+            dc.VideoMetadata("vid1", None),
+            dc.VideoMetadata("vid2", None),
+            dc.VideoMetadata("vid3", None),
+        ],
+    )
 
     def fake_run_download_attempt(
         urls,
@@ -240,7 +248,7 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
     primary = dc.DEFAULT_PLAYER_CLIENTS[-1]
     args = make_args(youtube_client=primary)
 
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", tuple(dc.DEFAULT_PLAYER_CLIENTS))
 
     calls = []
@@ -286,7 +294,7 @@ def test_download_source_limits_attempts_per_client(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv", "web_safari"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv", "web_safari"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     calls = []
 

@@ -48,10 +48,14 @@ def test_collect_video_ids_from_info_handles_nested_entries() -> None:
         ],
     }
 
-    dest: set[str] = set()
+    dest: list[dc.VideoMetadata] = []
     dc._collect_video_ids_from_info(info, dest)
 
-    assert dest == {"video-1", "video-2", "video-3"}
+    assert dest == [
+        dc.VideoMetadata("video-1", None),
+        dc.VideoMetadata("video-2", None),
+        dc.VideoMetadata("video-3", None),
+    ]
 
 
 def test_collect_all_video_ids_uses_metadata_without_archive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,7 +80,7 @@ def test_collect_all_video_ids_uses_metadata_without_archive(monkeypatch: pytest
 
     ids = dc.collect_all_video_ids(["https://example.com/channel"], args, None)
 
-    assert ids == {"a", "b"}
+    assert ids == [dc.VideoMetadata("a", None), dc.VideoMetadata("b", None)]
     assert captured_opts["skip_download"] is True
     assert captured_opts["progress_hooks"] == []
     assert "download_archive" not in captured_opts
@@ -90,7 +94,15 @@ def test_download_source_summary_includes_metadata_count(
     args = make_args()
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv",))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: {"one", "two", "three"})
+    monkeypatch.setattr(
+        dc,
+        "collect_all_video_ids",
+        lambda *a, **k: [
+            dc.VideoMetadata("one", None),
+            dc.VideoMetadata("two", None),
+            dc.VideoMetadata("three", None),
+        ],
+    )
 
     def fake_run(*_a, **_kw):
         return dc.DownloadAttempt(
