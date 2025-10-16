@@ -222,11 +222,21 @@ def perform_scan(config: InterfaceConfig, *, update_state: bool) -> Optional[Sca
     archive_ids = downloader._load_download_archive(config.args.archive)
     player_client = _first_player_client(config.args)
 
+    total_sources = len(sources)
     statuses: List[SourceStatus] = []
-    for source in sources:
+    for idx, source in enumerate(sources, start=1):
+        print(f"[scan {idx}/{total_sources}] Checking {source.url}")
         status = _scan_single_source(source, config.args, archive_ids, player_client)
         if status:
+            print(
+                "    -> "
+                f"total: {status.total_videos}, "
+                f"downloaded: {status.downloaded_videos}, "
+                f"pending: {status.pending_videos}"
+            )
             statuses.append(status)
+        else:
+            print("    -> Skipped (no metadata collected)")
 
     if update_state:
         save_known_sources(config.state_path, raw_lines)
@@ -315,9 +325,11 @@ def handle_option_three(config: InterfaceConfig) -> None:
         print("\nAll sources are fully downloaded. Nothing to do.")
         return
 
-    for status in pending_sources:
+    total_pending = len(pending_sources)
+    for idx, status in enumerate(pending_sources, start=1):
         print(
-            f"\nDownloading pending videos for {status.label} (count: {status.pending_videos})"
+            f"\nDownloading pending videos for {status.label} "
+            f"(source {idx}/{total_pending}, count: {status.pending_videos})"
         )
         downloader.download_source(status.source, config.args)
 
