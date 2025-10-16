@@ -121,7 +121,7 @@ def build_args_from_options(options: argparse.Namespace) -> argparse.Namespace:
         bgutil_script_path=options.bgutil_script_path,
         bgutil_provider_candidates=[],
         bgutil_provider_resolved="disabled",
-        watch_interval=None,
+        watch_interval=options.watch_interval,
     )
 
     downloader.apply_authentication_defaults(args)
@@ -419,6 +419,12 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
         "--bgutil-script-path",
         default=None,
         help="Path to the BGUtil script provider",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=float,
+        default=None,
+        help="Polling interval used by the non-interactive downloader (accepted for compatibility)",
     )
     return parser.parse_args(argv)
 
