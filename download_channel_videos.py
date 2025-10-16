@@ -1822,15 +1822,20 @@ def download_source(source: Source, args) -> None:
     print(border_line)
 
 
-def load_sources_from_url(url: str) -> List[Source]:
+class RemoteSourceError(Exception):
+    """Raised when a remote channels list cannot be retrieved or parsed."""
+
+
+def load_sources_from_url(url: str) -> Tuple[List[Source], List[str]]:
     print(f"\nFetching source list from {url} ...")
     try:
         with urllib.request.urlopen(url) as response:
             data = response.read().decode("utf-8")
     except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-        print(f"Failed to fetch source list from {url}: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise RemoteSourceError(f"Failed to fetch source list from {url}: {exc}") from exc
+
     sources: List[Source] = []
+    raw_lines: List[str] = []
     for idx, line in enumerate(data.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -1838,11 +1843,14 @@ def load_sources_from_url(url: str) -> List[Source]:
         try:
             parsed = parse_source_line(stripped)
         except ValueError as exc:
-            raise SystemExit(f"Failed to parse line {idx} from {url}: {exc}")
+            raise RemoteSourceError(
+                f"Failed to parse line {idx} from {url}: {exc}"
+            ) from exc
         if parsed:
             sources.append(parsed)
+            raw_lines.append(stripped)
     print(f"Loaded {len(sources)} sources from remote list")
-    return sources
+    return sources, raw_lines
 
 
 def load_sources_from_file(path: str) -> Tuple[List[Source], List[str]]:
@@ -1932,7 +1940,11 @@ def main() -> int:
             return 0
 
     elif args.channels_url:
-        sources = load_sources_from_url(args.channels_url)
+        try:
+            sources, _ = load_sources_from_url(args.channels_url)
+        except RemoteSourceError as exc:
+            print(exc, file=sys.stderr)
+            return 1
         for source in sources:
             download_source(source, args)
 

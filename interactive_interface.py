@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -17,7 +19,8 @@ import download_channel_videos as downloader
 class InterfaceConfig:
     """Runtime configuration for the interactive interface."""
 
-    channels_file: str
+    channels_file: Optional[str]
+    channels_url: Optional[str]
     args: argparse.Namespace
     state_path: str
 
@@ -44,8 +47,27 @@ class ScanResult:
     raw_lines: List[str]
 
 
-def state_path_for_channels(channels_path: str) -> str:
+def _sanitized_remote_state_name(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+    parts = [parsed.netloc, parsed.path.strip("/")]
+    joined = "_".join(part for part in parts if part)
+    safe = joined.replace("/", "_").replace(":", "_") or "remote"
+    return f".channels_state_{safe}_{digest}.json"
+
+
+def state_path_for_channels(
+    channels_path: Optional[str], channels_url: Optional[str]
+) -> str:
     """Return the location used to remember previously seen sources."""
+
+    if channels_url:
+        filename = _sanitized_remote_state_name(channels_url)
+        directory = os.getcwd()
+        return os.path.join(directory, filename)
+
+    if not channels_path:
+        raise ValueError("Either channels_path or channels_url must be provided")
 
     directory = os.path.dirname(os.path.abspath(channels_path)) or os.getcwd()
     return os.path.join(directory, ".channels_state.json")
@@ -93,7 +115,7 @@ def build_args_from_options(options: argparse.Namespace) -> argparse.Namespace:
     args = argparse.Namespace(
         url=None,
         channels_file=options.channels_file,
-        channels_url=None,
+        channels_url=options.channels_url,
         output=options.output,
         archive=options.archive,
         since=options.since,
@@ -174,10 +196,21 @@ def _scan_single_source(
 def perform_scan(config: InterfaceConfig, *, update_state: bool) -> Optional[ScanResult]:
     """Collect metadata for every configured source."""
 
+    sources: List[downloader.Source]
+    raw_lines: List[str]
     try:
-        sources, raw_lines = downloader.load_sources_from_file(config.channels_file)
+        if config.channels_url:
+            sources, raw_lines = downloader.load_sources_from_url(config.channels_url)
+        elif config.channels_file:
+            sources, raw_lines = downloader.load_sources_from_file(config.channels_file)
+        else:
+            print("No channels file or URL configured.")
+            return None
     except FileNotFoundError:
         print(f"channels file not found: {config.channels_file}")
+        return None
+    except downloader.RemoteSourceError as exc:
+        print(exc)
         return None
     except ValueError as exc:
         print(exc)
@@ -297,6 +330,14 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
         "--channels-file",
         default="channels.txt",
         help="Path to channels.txt file (default: channels.txt)",
+    )
+    parser.add_argument(
+        "--channels-url",
+        default=None,
+        help=(
+            "URL to a remote channels.txt file. Each non-comment line can optionally "
+            "start with 'channel:', 'playlist:', or 'video:'."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -456,9 +497,10 @@ def run_menu(config: InterfaceConfig) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     options = parse_interface_args(argv)
     args = build_args_from_options(options)
-    state_path = state_path_for_channels(options.channels_file)
+    state_path = state_path_for_channels(options.channels_file, options.channels_url)
     config = InterfaceConfig(
         channels_file=options.channels_file,
+        channels_url=options.channels_url,
         args=args,
         state_path=state_path,
     )
