@@ -52,6 +52,12 @@ class DownloadAttempt:
     consecutive_limit_reached: bool = False
 
 
+@dataclass(frozen=True)
+class VideoMetadata:
+    video_id: str
+    title: Optional[str] = None
+
+
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
@@ -208,15 +214,22 @@ class DownloadLogger:
         self._handle_message(text)
 
 
-def _collect_video_ids_from_info(info: object, dest: Set[str]) -> None:
+def _collect_video_ids_from_info(
+    info: object,
+    dest: List[VideoMetadata],
+    seen: Optional[Set[str]] = None,
+) -> None:
     """Recursively extract video identifiers from yt-dlp metadata objects."""
+
+    if seen is None:
+        seen = set()
 
     if info is None:
         return
 
     if isinstance(info, list):
         for entry in info:
-            _collect_video_ids_from_info(entry, dest)
+            _collect_video_ids_from_info(entry, dest, seen)
         return
 
     if not isinstance(info, dict):
@@ -226,21 +239,26 @@ def _collect_video_ids_from_info(info: object, dest: Set[str]) -> None:
 
     if info_type in {"playlist", "multi_video", "compat_list"}:
         entries = info.get("entries") or []
-        _collect_video_ids_from_info(entries, dest)
+        _collect_video_ids_from_info(entries, dest, seen)
         return
 
     if info_type == "url" and "entries" in info:
-        _collect_video_ids_from_info(info.get("entries"), dest)
+        _collect_video_ids_from_info(info.get("entries"), dest, seen)
 
     video_id = info.get("id")
     if video_id:
-        dest.add(str(video_id))
+        video_id_str = str(video_id)
+        if video_id_str not in seen:
+            seen.add(video_id_str)
+            title = info.get("title")
+            title_str = title if isinstance(title, str) else None
+            dest.append(VideoMetadata(video_id=video_id_str, title=title_str))
 
 
 def collect_all_video_ids(
     urls: Iterable[str], args, player_client: Optional[str]
-) -> Set[str]:
-    """Fetch playlist metadata to determine every video ID for the given URLs."""
+) -> List[VideoMetadata]:
+    """Fetch playlist metadata to determine every video entry for the given URLs."""
 
     logger = DownloadLogger()
 
@@ -259,7 +277,8 @@ def collect_all_video_ids(
     ydl_opts.pop("download_archive", None)
     ydl_opts.pop("match_filter", None)
 
-    video_ids: Set[str] = set()
+    video_metadata: List[VideoMetadata] = []
+    seen_ids: Set[str] = set()
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -272,11 +291,11 @@ def collect_all_video_ids(
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.record_exception(exc)
                     continue
-                _collect_video_ids_from_info(info, video_ids)
+                _collect_video_ids_from_info(info, video_metadata, seen_ids)
     except KeyboardInterrupt:
         raise
 
-    return video_ids
+    return video_metadata
 
 
 class SourceType(Enum):
@@ -1566,14 +1585,16 @@ def download_source(source: Source, args) -> None:
             print(
                 f"No existing download archive at {archive_path}; it will be created after downloads."
             )
-    metadata_video_ids = collect_all_video_ids(urls, args, client_attempts[0] if client_attempts else None)
-    if metadata_video_ids:
+    metadata_video_entries = collect_all_video_ids(
+        urls, args, client_attempts[0] if client_attempts else None
+    )
+    if metadata_video_entries:
         print(
             "\nMetadata scan detected"
-            f" {len(metadata_video_ids)} video"
-            f"{'s' if len(metadata_video_ids) != 1 else ''} before downloading."
+            f" {len(metadata_video_entries)} video"
+            f"{'s' if len(metadata_video_entries) != 1 else ''} before downloading."
         )
-    detected_ids: Set[str] = set(metadata_video_ids)
+    detected_ids: Set[str] = {entry.video_id for entry in metadata_video_entries}
     downloaded_in_session: Set[str] = set()
     pending_retry_ids: Optional[Set[str]] = None
     total_downloaded = 0

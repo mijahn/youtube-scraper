@@ -36,6 +36,7 @@ class SourceStatus:
     downloaded_videos: int
     pending_videos: int
     pending_ids: Set[str]
+    videos: List[downloader.VideoMetadata]
 
 
 @dataclass
@@ -177,19 +178,27 @@ def _scan_single_source(
         )
         return None
 
-    video_ids = downloader.collect_all_video_ids(urls, args, player_client)
-    downloaded_ids = archive_ids & video_ids
-    pending_ids = video_ids - archive_ids
+    video_entries = downloader.collect_all_video_ids(urls, args, player_client)
+    video_ids = [entry.video_id for entry in video_entries]
+    video_id_set = set(video_ids)
+    downloaded_ids = archive_ids & video_id_set
+    pending_ids = video_id_set - archive_ids
+
+    for index, entry in enumerate(video_entries, start=1):
+        state = "downloaded" if entry.video_id in archive_ids else "pending"
+        title = entry.title or entry.video_id
+        print(f"    video {index}: {title} [{state}]")
 
     label = downloader.summarize_source_label(source, display_url)
     return SourceStatus(
         source=source,
         label=label,
         display_url=display_url,
-        total_videos=len(video_ids),
+        total_videos=len(video_entries),
         downloaded_videos=len(downloaded_ids),
         pending_videos=len(pending_ids),
         pending_ids=pending_ids,
+        videos=video_entries,
     )
 
 

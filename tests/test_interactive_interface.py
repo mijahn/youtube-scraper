@@ -78,7 +78,7 @@ def test_perform_scan_remote_sources(monkeypatch, tmp_path):
 
     def fake_collect_all_video_ids(urls, args, player_client):
         assert urls
-        return {"abc123"}
+        return [interface.downloader.VideoMetadata("abc123", "Sample Video")]
 
     monkeypatch.setattr(
         interface.downloader, "load_sources_from_url", fake_load_sources_from_url
@@ -113,7 +113,47 @@ def test_perform_scan_remote_sources(monkeypatch, tmp_path):
     assert scan.raw_lines == [source_line]
     assert scan.new_sources == [source_line]
     assert scan.statuses[0].pending_videos == 1
+    assert scan.statuses[0].videos == [
+        interface.downloader.VideoMetadata("abc123", "Sample Video")
+    ]
 
     with open(config.state_path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
     assert data["sources"] == [source_line]
+
+
+def test_scan_single_source_reports_individual_video_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    source = interface.downloader.Source(
+        interface.downloader.SourceType.CHANNEL,
+        "https://www.youtube.com/@Example",
+    )
+
+    entries = [
+        interface.downloader.VideoMetadata("vid-1", "First Video"),
+        interface.downloader.VideoMetadata("vid-2", None),
+    ]
+
+    monkeypatch.setattr(
+        interface.downloader, "collect_all_video_ids", lambda *_a, **_k: entries
+    )
+    monkeypatch.setattr(interface.downloader, "normalize_url", lambda value: value)
+    monkeypatch.setattr(
+        interface.downloader,
+        "summarize_source_label",
+        lambda source, display_url: "Example Channel",
+    )
+
+    args = interface.build_args_from_options(
+        interface.parse_interface_args(["--output", str(tmp_path / "out")])
+    )
+
+    status = interface._scan_single_source(source, args, {"vid-1"}, None)
+    assert status is not None
+    assert status.downloaded_videos == 1
+    assert status.pending_videos == 1
+
+    captured = capsys.readouterr().out
+    assert "video 1: First Video [downloaded]" in captured
+    assert "video 2: vid-2 [pending]" in captured

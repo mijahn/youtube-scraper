@@ -135,7 +135,7 @@ def test_download_source_loads_archive_and_updates(monkeypatch: pytest.MonkeyPat
     args = make_args(output=str(tmp_path), archive=str(archive_path))
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
 
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     appended = []
 

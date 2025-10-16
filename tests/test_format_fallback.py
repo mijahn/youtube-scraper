@@ -45,7 +45,7 @@ def test_ios_client_uses_format_fallback(monkeypatch: pytest.MonkeyPatch, capsys
 
     monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("ios", "web"))
     monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("ios", "web"))
-    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: set())
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
 
     class FakeYoutubeDL:
         calls = []
