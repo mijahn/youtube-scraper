@@ -67,6 +67,13 @@ def test_parse_interface_args_includes_channels_url():
     assert args.channels_file == "channels.txt"
 
 
+def test_build_args_from_options_respects_failure_limit():
+    options = interface.parse_interface_args(["--failure-limit", "9"])
+    args = interface.build_args_from_options(options)
+
+    assert args.failure_limit == 9
+
+
 def test_perform_scan_remote_sources(monkeypatch, tmp_path):
     url = "https://example.com/list.txt"
     source_line = "channel:https://youtube.com/@example"

@@ -37,6 +37,9 @@ except ImportError:
     sys.exit(1)
 
 
+DEFAULT_FAILURE_LIMIT = 5
+
+
 @dataclass
 class DownloadAttempt:
     downloaded: int
@@ -50,6 +53,7 @@ class DownloadAttempt:
     total_failure_count: int = 0
     failure_limit_reached: bool = False
     consecutive_limit_reached: bool = False
+    failure_limit: int = DEFAULT_FAILURE_LIMIT
 
 
 @dataclass(frozen=True)
@@ -371,7 +375,6 @@ def _default_player_clients() -> Tuple[str, ...]:
 
 DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
 
-MAX_FAILURES_PER_CLIENT = 5
 MAX_ATTEMPTS_PER_CLIENT = 5
 
 
@@ -581,6 +584,22 @@ def _append_to_download_archive(path: Optional[str], video_id: Optional[str]) ->
         os.close(fd)
 
 
+def positive_int(value: str) -> int:
+    """Return *value* parsed as a positive integer for argparse."""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        raise argparse.ArgumentTypeError(
+            "Expected a positive integer"
+        ) from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("Expected a positive integer")
+
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download videos from YouTube channels, playlists, or single videos using yt-dlp."
@@ -651,6 +670,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Maximum randomized sleep between video downloads",
+    )
+    parser.add_argument(
+        "--failure-limit",
+        type=positive_int,
+        default=DEFAULT_FAILURE_LIMIT,
+        help=(
+            "Number of failed downloads allowed before switching to the next "
+            "YouTube client (default: 5)"
+        ),
     )
     parser.add_argument(
         "--allow-restricted",
@@ -1142,6 +1170,7 @@ def run_download_attempt(
     max_total: Optional[int],
     downloaded_ids: Optional[Set[str]],
     target_video_ids: Optional[Set[str]] = None,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
 ) -> DownloadAttempt:
     logger = DownloadLogger()
     downloaded = 0
@@ -1151,6 +1180,8 @@ def run_download_attempt(
     total_failures = 0
     consecutive_failures = 0
     failure_limit_reason: Optional[str] = None
+    if failure_limit <= 0:
+        failure_limit = DEFAULT_FAILURE_LIMIT
     seen_ids: Set[str]
     if downloaded_ids is not None:
         seen_ids = downloaded_ids
@@ -1266,10 +1297,10 @@ def run_download_attempt(
             failed_video_ids.add(failed_video_id)
 
         limit_reason: Optional[str] = None
-        if consecutive_failures >= MAX_FAILURES_PER_CLIENT:
+        if consecutive_failures >= failure_limit:
             consecutive_limit_reached = True
             limit_reason = "consecutive"
-        elif total_failures >= MAX_FAILURES_PER_CLIENT:
+        elif total_failures >= failure_limit:
             limit_reason = "total"
 
         if limit_reason:
@@ -1281,11 +1312,14 @@ def run_download_attempt(
                         (
                             f"Aborting client {client_label} after "
                             f"{consecutive_failures} consecutive download failures "
-                            f"(total failures: {total_failures})"
+                            f"(total failures: {total_failures}, limit={failure_limit})"
                         )
                     )
                 raise DownloadCancelled(
-                    f"Aborting client {client_label} after {total_failures} total download failures"
+                    (
+                        f"Aborting client {client_label} after {total_failures} "
+                        f"total download failures (limit={failure_limit})"
+                    )
                 )
 
     logger.set_failure_callback(
@@ -1491,6 +1525,7 @@ def run_download_attempt(
         total_failure_count=total_failures,
         failure_limit_reached=failure_limit_reached,
         consecutive_limit_reached=consecutive_limit_reached,
+        failure_limit=failure_limit,
     )
 
 
@@ -1515,7 +1550,7 @@ def format_attempt_summary(attempt: DownloadAttempt) -> str:
         parts.append("stopped due to limit")
     if attempt.failure_limit_reached:
         parts.append(
-            f"reached failure limit ({MAX_FAILURES_PER_CLIENT})"
+            f"reached failure limit ({attempt.failure_limit})"
         )
     return ", ".join(parts)
 
@@ -1638,6 +1673,7 @@ def download_source(source: Source, args) -> None:
                 max_total,
                 downloaded_ids,
                 target_ids,
+                failure_limit=getattr(args, "failure_limit", DEFAULT_FAILURE_LIMIT),
             )
             pending_retry_ids = None
             last_result = result
@@ -1690,15 +1726,15 @@ def download_source(source: Source, args) -> None:
                     next_client = client_attempts[idx + 1]
                     print(
                         "\nReached the maximum of"
-                        f" {MAX_FAILURES_PER_CLIENT} {limit_label} with the"
+                        f" {result.failure_limit} {limit_label} with the"
                         f" {client!r} client. Trying {next_client!r} next..."
                     )
                     should_switch_client = True
                 else:
                     print(
                         "\nReached the maximum number of"
-                        f" {limit_label} and no additional clients are available"
-                        f" after {client!r}."
+                        f" {limit_label} (limit={result.failure_limit}) and no additional"
+                        f" clients are available after {client!r}."
                     )
                     stop_all_attempts = True
                 break

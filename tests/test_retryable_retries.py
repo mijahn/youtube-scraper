@@ -34,6 +34,7 @@ def make_args(**overrides):
         "youtube_player_params": None,
         "no_shorts": False,
         "max": None,
+        "failure_limit": dc.DEFAULT_FAILURE_LIMIT,
     }
     defaults.update(overrides)
     args = SimpleNamespace(**defaults)
@@ -58,6 +59,7 @@ def test_download_source_retries_next_client_on_retryable(monkeypatch: pytest.Mo
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         calls.append(
             {
@@ -113,6 +115,7 @@ def test_download_source_cycles_on_other_errors(monkeypatch: pytest.MonkeyPatch)
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
         if len(calls) == 1:
@@ -161,6 +164,7 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         calls.append({"client": client, "urls": tuple(urls), "seen": set(downloaded_ids)})
         if len(calls) == 1:
@@ -192,6 +196,41 @@ def test_download_source_retries_after_unavailable(monkeypatch: pytest.MonkeyPat
     assert calls[1]["seen"] == {"first-id"}
 
 
+def test_download_source_uses_configured_failure_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
+    args = make_args(failure_limit=7)
+
+    monkeypatch.setattr(dc, "DEFAULT_PLAYER_CLIENTS", ("tv",))
+    monkeypatch.setattr(dc, "PLAYER_CLIENT_CHOICES", ("tv",))
+    monkeypatch.setattr(dc, "collect_all_video_ids", lambda *a, **k: [])
+
+    captured_limits = []
+
+    def fake_run_download_attempt(
+        urls,
+        args_,
+        client,
+        max_total,
+        downloaded_ids,
+        target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
+    ):
+        captured_limits.append(failure_limit)
+        return dc.DownloadAttempt(
+            downloaded=0,
+            video_unavailable_errors=0,
+            other_errors=0,
+            retryable_error_ids=set(),
+            stopped_due_to_limit=True,
+        )
+
+    monkeypatch.setattr(dc, "run_download_attempt", fake_run_download_attempt)
+
+    dc.download_source(source, args)
+
+    assert captured_limits == [args.failure_limit]
+
+
 def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     source = dc.Source(dc.SourceType.CHANNEL, "https://www.youtube.com/@Example")
     args = make_args()
@@ -215,6 +254,7 @@ def test_download_source_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys)
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         return dc.DownloadAttempt(
             downloaded=2,
@@ -260,6 +300,7 @@ def test_download_source_cycles_after_user_selected_client(monkeypatch: pytest.M
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         calls.append(client)
         if len(calls) == 1:
@@ -305,6 +346,7 @@ def test_download_source_limits_attempts_per_client(monkeypatch: pytest.MonkeyPa
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         calls.append(client)
         if client == "tv":
@@ -341,6 +383,8 @@ def test_run_download_attempt_respects_failure_threshold(
 ) -> None:
     args = make_args()
 
+    limit = args.failure_limit
+
     class FakeYoutubeDL:
         def __init__(self, params):
             self.params = params
@@ -362,7 +406,7 @@ def test_run_download_attempt_respects_failure_threshold(
                 "info_dict": info,
                 "error": "HTTP Error 403: Forbidden",
             }
-            for _ in range(dc.MAX_FAILURES_PER_CLIENT):
+            for _ in range(limit):
                 try:
                     hook(dict(payload))
                 except dc.DownloadCancelled:
@@ -380,8 +424,8 @@ def test_run_download_attempt_respects_failure_threshold(
 
     assert attempt.downloaded == 0
     assert attempt.failure_limit_reached is True
-    assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
-    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_count == limit
+    assert attempt.total_failure_count == limit
     assert attempt.consecutive_limit_reached is True
     assert "video-1" in attempt.retryable_error_ids
 
@@ -393,6 +437,8 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     args = make_args()
+
+    limit = args.failure_limit
 
     class FakeYoutubeDL:
         def __init__(self, params):
@@ -408,7 +454,7 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
             assert urls == ["https://www.youtube.com/watch?v=example"]
             logger = self.params.get("logger")
             assert isinstance(logger, dc.DownloadLogger)
-            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+            for idx in range(limit):
                 logger.set_video(f"video-{idx}")
                 try:
                     logger.error("Requested format is not available")
@@ -428,10 +474,10 @@ def test_run_download_attempt_logger_errors_trigger_failure_limit(
     )
 
     assert attempt.downloaded == 0
-    assert attempt.other_errors == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.other_errors == limit
     assert attempt.failure_limit_reached is True
-    assert attempt.failure_count == dc.MAX_FAILURES_PER_CLIENT
-    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.failure_count == limit
+    assert attempt.total_failure_count == limit
     assert attempt.consecutive_limit_reached is True
     assert not attempt.retryable_error_ids
 
@@ -519,8 +565,8 @@ def test_run_download_attempt_consecutive_resets_after_success(
 def test_run_download_attempt_total_limit_without_consecutive_streak(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    args = make_args()
-    monkeypatch.setattr(dc, "MAX_FAILURES_PER_CLIENT", 3)
+    args = make_args(failure_limit=3)
+    limit = args.failure_limit
 
     class FakeYoutubeDL:
         def __init__(self, params):
@@ -538,7 +584,7 @@ def test_run_download_attempt_total_limit_without_consecutive_streak(
             assert hooks, "Expected at least one progress hook"
             hook = hooks[0]
 
-            for idx in range(dc.MAX_FAILURES_PER_CLIENT):
+            for idx in range(limit):
                 video_id = f"video-{idx}"
                 info = {"id": video_id, "title": f"Example {idx}"}
                 error_payload = {
@@ -549,11 +595,11 @@ def test_run_download_attempt_total_limit_without_consecutive_streak(
                 try:
                     hook(dict(error_payload))
                 except dc.DownloadCancelled:
-                    if idx != dc.MAX_FAILURES_PER_CLIENT - 1:
+                    if idx != limit - 1:
                         pytest.fail("failure limit triggered before total cap")
                     raise
 
-                if idx < dc.MAX_FAILURES_PER_CLIENT - 1:
+                if idx < limit - 1:
                     hook({"status": "finished", "info_dict": info})
 
     monkeypatch.setattr(dc.yt_dlp, "YoutubeDL", FakeYoutubeDL)
@@ -564,10 +610,11 @@ def test_run_download_attempt_total_limit_without_consecutive_streak(
         player_client="tv",
         max_total=None,
         downloaded_ids=set(),
+        failure_limit=limit,
     )
 
     assert attempt.failure_limit_reached is True
-    assert attempt.total_failure_count == dc.MAX_FAILURES_PER_CLIENT
+    assert attempt.total_failure_count == limit
     assert attempt.failure_count == 1
     assert attempt.consecutive_limit_reached is False
 
