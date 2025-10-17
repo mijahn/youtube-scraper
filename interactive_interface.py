@@ -145,6 +145,7 @@ def build_args_from_options(options: argparse.Namespace) -> argparse.Namespace:
         bgutil_provider_candidates=[],
         bgutil_provider_resolved="disabled",
         watch_interval=options.watch_interval,
+        failure_limit=options.failure_limit,
     )
 
     downloader.apply_authentication_defaults(args)
@@ -441,6 +442,15 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
         type=float,
         default=None,
         help="Maximum randomized sleep between downloads",
+    )
+    parser.add_argument(
+        "--failure-limit",
+        type=downloader.positive_int,
+        default=downloader.DEFAULT_FAILURE_LIMIT,
+        help=(
+            "Number of failed downloads allowed per client before switching "
+            "to the next YouTube player client"
+        ),
     )
     parser.add_argument(
         "--allow-restricted",

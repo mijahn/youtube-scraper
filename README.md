@@ -85,6 +85,8 @@ The downloader now automatically retries with different YouTube player clients w
 - **Leverage yt-dlp's PO Token support** with `--youtube-fetch-po-token always` so the new 2025.9.26 release proactively
   requests integrity tokens for clients that need them, or pass your own tokens via `--youtube-po-token
   CLIENT.CONTEXT+TOKEN` when integrating an external provider.
+- **Increase the error tolerance** with `--failure-limit 8` (or another positive number) when you expect brief hiccups and
+  prefer to give each player client more chances before rotating to the next option.
 - If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
 
 ### Interactive menu for scanning & downloads

@@ -30,6 +30,7 @@ def make_args(**overrides):
         "youtube_player_params": None,
         "no_shorts": False,
         "max": None,
+        "failure_limit": dc.DEFAULT_FAILURE_LIMIT,
     }
     defaults.update(overrides)
     args = SimpleNamespace(**defaults)
@@ -160,6 +161,7 @@ def test_download_source_loads_archive_and_updates(monkeypatch: pytest.MonkeyPat
         max_total,
         downloaded_ids,
         target_video_ids=None,
+        failure_limit=dc.DEFAULT_FAILURE_LIMIT,
     ):
         captured_sets.append(set(downloaded_ids))
         downloaded_ids.add("fresh-id")
