@@ -157,3 +157,42 @@ def test_scan_single_source_reports_individual_video_status(
     captured = capsys.readouterr().out
     assert "video 1: First Video [downloaded]" in captured
     assert "video 2: vid-2 [pending]" in captured
+
+
+def test_scan_single_source_detects_existing_local_files(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    source = interface.downloader.Source(
+        interface.downloader.SourceType.CHANNEL,
+        "https://www.youtube.com/@Example",
+    )
+
+    entries = [
+        interface.downloader.VideoMetadata("vid-3", "Existing Video"),
+    ]
+
+    monkeypatch.setattr(
+        interface.downloader, "collect_all_video_ids", lambda *_a, **_k: entries
+    )
+    monkeypatch.setattr(interface.downloader, "normalize_url", lambda value: value)
+    monkeypatch.setattr(
+        interface.downloader,
+        "summarize_source_label",
+        lambda source, display_url: "Example Channel",
+    )
+
+    output_dir = tmp_path / "out" / "Example Channel"
+    output_dir.mkdir(parents=True)
+    (output_dir / "20240101 - Sample Title [vid-3].mp4").write_text("")
+
+    args = interface.build_args_from_options(
+        interface.parse_interface_args(["--output", str(tmp_path / "out")])
+    )
+
+    status = interface._scan_single_source(source, args, set(), None)
+    assert status is not None
+    assert status.downloaded_videos == 1
+    assert status.pending_videos == 0
+
+    captured = capsys.readouterr().out
+    assert "video 1: Existing Video [downloaded]" in captured
