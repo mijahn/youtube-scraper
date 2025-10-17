@@ -181,11 +181,29 @@ def _scan_single_source(
     video_entries = downloader.collect_all_video_ids(urls, args, player_client)
     video_ids = [entry.video_id for entry in video_entries]
     video_id_set = set(video_ids)
-    downloaded_ids = archive_ids & video_id_set
-    pending_ids = video_id_set - archive_ids
+
+    local_ids: Set[str] = set()
+    output_root = getattr(args, "output", None)
+    if output_root and os.path.isdir(output_root):
+        for _dirpath, _dirnames, filenames in os.walk(output_root):
+            for filename in filenames:
+                start = filename.find("[")
+                while start != -1:
+                    end = filename.find("]", start + 1)
+                    if end == -1:
+                        break
+                    candidate = filename[start + 1 : end]
+                    if candidate in video_id_set:
+                        local_ids.add(candidate)
+                        break
+                    start = filename.find("[", end + 1)
+
+    known_ids = archive_ids | local_ids
+    downloaded_ids = known_ids & video_id_set
+    pending_ids = video_id_set - known_ids
 
     for index, entry in enumerate(video_entries, start=1):
-        state = "downloaded" if entry.video_id in archive_ids else "pending"
+        state = "downloaded" if entry.video_id in known_ids else "pending"
         title = entry.title or entry.video_id
         print(f"    video {index}: {title} [{state}]")
 
