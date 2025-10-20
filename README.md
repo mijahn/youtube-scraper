@@ -8,7 +8,22 @@ Download all videos from one or more YouTube channels using [yt-dlp](https://git
 
 ---
 
-## ⚠️ CRITICAL: Avoiding YouTube Rate Limiting & Blocks
+## ⚠️ IMPORTANT: Avoiding YouTube Blocks
+
+**TL;DR - Use these flags to avoid being blocked:**
+
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --cookies-from-browser chrome \
+  --youtube-client web
+```
+
+**The script now applies conservative rate-limiting defaults automatically** (2s between requests, 3-8s between downloads), so you can safely run it without additional flags. For more control or faster downloads, see the detailed settings below.
+
+---
+
+## ⚠️ DETAILED: Rate Limiting & Block Prevention
 
 **This script now includes conservative rate limiting defaults to prevent YouTube from blocking your requests.**
 
@@ -156,6 +171,39 @@ If temporary rate limits persist despite automatic backoff:
 - The script will show a warning message with pause duration
 - After pausing, downloads resume automatically
 - Use the archive file (`--archive`) to avoid re-downloading on restarts
+
+### Configuration File Support
+
+**Tired of remembering all the command-line flags?** Create a `config.json` file to store your preferred settings:
+
+```json
+{
+  "sleep_requests": 2.0,
+  "sleep_interval": 3.0,
+  "max_sleep_interval": 8.0,
+  "cookies_from_browser": "chrome",
+  "youtube_client": "web",
+  "failure_limit": 10,
+  "output": "./downloads",
+  "archive": "./downloads/.download-archive.txt"
+}
+```
+
+Place this file in the same directory where you run the script, and all these settings will be applied automatically. **Command-line arguments always override config file values**, so you can still customize individual runs.
+
+**Supported config keys:**
+- Rate limiting: `sleep_requests`, `sleep_interval`, `max_sleep_interval`, `failure_limit`
+- Authentication: `cookies_from_browser`, `youtube_client`, `youtube_fetch_po_token`
+- Output: `output`, `archive`, `format`, `merge_output_format`
+- Filters: `since`, `until`, `max`, `no_shorts`, `allow_restricted`
+- Performance: `rate_limit`, `concurrency`
+- Downloads: `skip_subtitles`, `skip_thumbs`
+- Advanced: `watch_interval`, `proxy`
+
+To use a different config file location:
+```bash
+python download_channel_videos.py --config /path/to/my-config.json
+```
 
 ### Interactive menu for scanning & downloads
 

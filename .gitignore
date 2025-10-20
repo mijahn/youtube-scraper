@@ -29,3 +29,4 @@ Thumbs.db
 .download-archive.txt
 .channels_state*.json
 downloads/
+config.json

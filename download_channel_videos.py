@@ -12,6 +12,7 @@ Supports:
 
 import argparse
 import contextlib
+import json
 import os
 import random
 import sys
@@ -680,9 +681,71 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def load_config_file(config_path: str) -> Dict[str, any]:
+    """Load configuration from a JSON file.
+
+    Returns a dictionary with configuration values that can be used as defaults
+    for command-line arguments. If the file doesn't exist or is invalid, returns
+    an empty dictionary.
+    """
+    if not os.path.exists(config_path):
+        return {}
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        if not isinstance(config, dict):
+            print(f"Warning: Config file {config_path} must contain a JSON object. Ignoring.", file=sys.stderr)
+            return {}
+
+        # Validate config keys to prevent typos
+        valid_keys = {
+            'sleep_requests', 'sleep_interval', 'max_sleep_interval',
+            'cookies_from_browser', 'youtube_client', 'failure_limit',
+            'output', 'archive', 'rate_limit', 'concurrency',
+            'skip_subtitles', 'skip_thumbs', 'format', 'merge_output_format',
+            'no_shorts', 'allow_restricted', 'youtube_fetch_po_token',
+            'watch_interval', 'since', 'until', 'max', 'proxy'
+        }
+
+        invalid_keys = set(config.keys()) - valid_keys
+        if invalid_keys:
+            print(f"Warning: Unknown config keys ignored: {', '.join(sorted(invalid_keys))}", file=sys.stderr)
+
+        return {k: v for k, v in config.items() if k in valid_keys}
+
+    except json.JSONDecodeError as exc:
+        print(f"Warning: Failed to parse config file {config_path}: {exc}. Ignoring.", file=sys.stderr)
+        return {}
+    except Exception as exc:
+        print(f"Warning: Failed to read config file {config_path}: {exc}. Ignoring.", file=sys.stderr)
+        return {}
+
+
 def parse_args() -> argparse.Namespace:
+    # First, check for config file
+    config_path = "config.json"  # Default config file
+    if "--config" in sys.argv:
+        try:
+            config_idx = sys.argv.index("--config")
+            if config_idx + 1 < len(sys.argv):
+                config_path = sys.argv[config_idx + 1]
+        except (ValueError, IndexError):
+            pass
+
+    # Load configuration from file
+    config = load_config_file(config_path)
+    if config:
+        print(f"Loaded configuration from {config_path}")
+
     parser = argparse.ArgumentParser(
         description="Download videos from YouTube channels, playlists, or single videos using yt-dlp."
+    )
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Path to JSON configuration file (default: config.json)",
     )
     parser.add_argument(
         "--url",
@@ -702,23 +765,24 @@ def parse_args() -> argparse.Namespace:
             " can optionally start with 'channel:', 'playlist:', or 'video:'."
         ),
     )
-    parser.add_argument("--output", default="./downloads", help="Output directory (default: ./downloads)")
-    parser.add_argument("--archive", default=None, help="Path to a download archive file to skip already downloaded videos")
-    parser.add_argument("--since", default=None, help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
-    parser.add_argument("--until", default=None, help="Only download videos uploaded on/before this date (YYYY-MM-DD)")
-    parser.add_argument("--max", type=int, default=None, help="Stop after downloading N videos per channel")
+    parser.add_argument("--output", default=config.get("output", "./downloads"), help="Output directory (default: ./downloads)")
+    parser.add_argument("--archive", default=config.get("archive"), help="Path to a download archive file to skip already downloaded videos")
+    parser.add_argument("--since", default=config.get("since"), help="Only download videos uploaded on/after this date (YYYY-MM-DD)")
+    parser.add_argument("--until", default=config.get("until"), help="Only download videos uploaded on/before this date (YYYY-MM-DD)")
+    parser.add_argument("--max", type=int, default=config.get("max"), help="Stop after downloading N videos per channel")
     parser.add_argument(
         "--no-shorts",
         action="store_true",
+        default=config.get("no_shorts", False),
         help="Exclude /shorts tab when downloading channel sources",
     )
-    parser.add_argument("--rate-limit", default=None, help="Limit download speed, e.g., 2M or 500K (passed to yt-dlp)")
-    parser.add_argument("--concurrency", type=int, default=None, help="Concurrent fragment downloads (HLS/DASH)")
-    parser.add_argument("--skip-subtitles", action="store_true", help="Do not download subtitles/auto-captions")
-    parser.add_argument("--skip-thumbs", action="store_true", help="Do not download thumbnails")
+    parser.add_argument("--rate-limit", default=config.get("rate_limit"), help="Limit download speed, e.g., 2M or 500K (passed to yt-dlp)")
+    parser.add_argument("--concurrency", type=int, default=config.get("concurrency"), help="Concurrent fragment downloads (HLS/DASH)")
+    parser.add_argument("--skip-subtitles", action="store_true", default=config.get("skip_subtitles", False), help="Do not download subtitles/auto-captions")
+    parser.add_argument("--skip-thumbs", action="store_true", default=config.get("skip_thumbs", False), help="Do not download thumbnails")
     parser.add_argument(
         "--format",
-        default=None,
+        default=config.get("format"),
         help=(
             "Format selector passed to yt-dlp. Defaults to yt-dlp's native behaviour when omitted, "
             "which picks the best available combination without forcing a container."
@@ -726,35 +790,35 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--merge-output-format",
-        default=None,
+        default=config.get("merge_output_format"),
         help=(
             "Container format for merged downloads (passed to yt-dlp). "
             "If omitted, yt-dlp will keep the original container when possible."
         ),
     )
-    parser.add_argument("--cookies-from-browser", default=None, help="Use cookies from your browser (chrome, safari, firefox, edge, etc.)")
+    parser.add_argument("--cookies-from-browser", default=config.get("cookies_from_browser"), help="Use cookies from your browser (chrome, safari, firefox, edge, etc.)")
     parser.add_argument(
         "--sleep-requests",
         type=float,
-        default=2.0,  # Conservative default: 2 seconds between HTTP requests
+        default=config.get("sleep_requests", 2.0),  # Conservative default: 2 seconds between HTTP requests
         help="Seconds to sleep between HTTP requests (default: 2.0, helps avoid rate limiting)",
     )
     parser.add_argument(
         "--sleep-interval",
         type=float,
-        default=3.0,  # Conservative default: minimum 3 seconds between downloads
+        default=config.get("sleep_interval", 3.0),  # Conservative default: minimum 3 seconds between downloads
         help="Minimum randomized sleep between video downloads (default: 3.0)",
     )
     parser.add_argument(
         "--max-sleep-interval",
         type=float,
-        default=8.0,  # Conservative default: maximum 8 seconds between downloads
+        default=config.get("max_sleep_interval", 8.0),  # Conservative default: maximum 8 seconds between downloads
         help="Maximum randomized sleep between video downloads (default: 8.0)",
     )
     parser.add_argument(
         "--failure-limit",
         type=positive_int,
-        default=DEFAULT_FAILURE_LIMIT,
+        default=config.get("failure_limit", DEFAULT_FAILURE_LIMIT),
         help=(
             "Number of failed downloads allowed before switching to the next "
             "YouTube client (default: 10)"
@@ -763,6 +827,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-restricted",
         action="store_true",
+        default=config.get("allow_restricted", False),
         help=(
             "Download restricted videos (subscriber-only, Premium, private, etc.)"
             " when authentication is available"
@@ -771,7 +836,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--youtube-client",
         choices=PLAYER_CLIENT_CHOICES,
-        default=None,
+        default=config.get("youtube_client"),
         help=(
             "Override the YouTube player client used by yt-dlp "
             "(default: yt-dlp's recommended clients)"
@@ -780,7 +845,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--youtube-fetch-po-token",
         choices=["auto", "always", "never"],
-        default=None,
+        default=config.get("youtube_fetch_po_token"),
         help=(
             "Control how yt-dlp fetches YouTube PO Tokens when required. "
             "Set to 'always' to proactively request tokens or 'never' to skip. "
@@ -847,7 +912,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--watch-interval",
         type=float,
-        default=300.0,
+        default=config.get("watch_interval", 300.0),
         help="When using --channels-file, seconds between checks for updates (default: 300)",
     )
     parser.add_argument(
@@ -860,7 +925,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proxy",
-        default=None,
+        default=config.get("proxy"),
         help="Use a single proxy for all requests (e.g., http://proxy.example.com:8080 or socks5://127.0.0.1:1080)",
     )
     parser.add_argument(
@@ -1916,6 +1981,7 @@ def download_source(source: Source, args) -> None:
 
             # Track session telemetry
             session_pauses_for_rate_limiting += result.rate_limit_pauses
+            session_http_403_count += len(result.retryable_error_ids)
 
             print(
                 f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
@@ -2108,16 +2174,20 @@ def download_source(source: Source, args) -> None:
     print(border_line)
     # Session telemetry
     print(f"{label_color}Session Statistics:{reset}")
+    print(f"  {label_color}Videos processed:{reset} {value_color}{total_detected}{reset}")
+    print(f"  {label_color}Videos downloaded:{reset} {value_color}{total_downloaded}{reset}")
+    if total_unavailable > 0:
+        print(f"  {label_color}Video unavailable errors:{reset} {value_color}{total_unavailable}{reset}")
+    if session_http_403_count > 0:
+        print(f"  {label_color}HTTP 403 errors:{reset} {value_color}{session_http_403_count}{reset}")
     if session_client_rotations > 0:
         print(f"  {label_color}Client rotations:{reset} {value_color}{session_client_rotations}{reset}")
     if session_pauses_for_rate_limiting > 0:
         print(f"  {label_color}Rate limit pauses:{reset} {value_color}{session_pauses_for_rate_limiting}{reset}")
-    # Count total retryable errors (HTTP 403s) across all attempts
-    total_retryable = len(last_result.retryable_error_ids) if last_result else 0
-    if total_retryable > 0:
-        print(f"  {label_color}HTTP 403 errors:{reset} {value_color}{total_retryable}{reset}")
     avg_delay = args.sleep_requests or 2.0
+    sleep_range = f"{args.sleep_interval or 3.0}-{args.max_sleep_interval or 8.0}s"
     print(f"  {label_color}Request delay:{reset} {value_color}{avg_delay}s{reset}")
+    print(f"  {label_color}Download delay:{reset} {value_color}{sleep_range}{reset}")
     print(border_line)
 
 

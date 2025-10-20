@@ -1,0 +1,10 @@
+{
+  "sleep_requests": 2.0,
+  "sleep_interval": 3.0,
+  "max_sleep_interval": 8.0,
+  "cookies_from_browser": "chrome",
+  "youtube_client": "web",
+  "failure_limit": 10,
+  "output": "./downloads",
+  "archive": "./downloads/.download-archive.txt"
+}

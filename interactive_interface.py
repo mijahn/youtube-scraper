@@ -428,20 +428,20 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
     parser.add_argument(
         "--sleep-requests",
         type=float,
-        default=None,
-        help="Seconds to sleep between HTTP requests (default: 2.0 from downloader)",
+        default=2.0,  # Conservative default: 2 seconds between HTTP requests
+        help="Seconds to sleep between HTTP requests (default: 2.0)",
     )
     parser.add_argument(
         "--sleep-interval",
         type=float,
-        default=None,
-        help="Minimum randomized sleep between downloads (default: 3.0 from downloader)",
+        default=3.0,  # Conservative default: minimum 3 seconds between downloads
+        help="Minimum randomized sleep between downloads (default: 3.0)",
     )
     parser.add_argument(
         "--max-sleep-interval",
         type=float,
-        default=None,
-        help="Maximum randomized sleep between downloads (default: 8.0 from downloader)",
+        default=8.0,  # Conservative default: maximum 8 seconds between downloads
+        help="Maximum randomized sleep between downloads (default: 8.0)",
     )
     parser.add_argument(
         "--failure-limit",
