@@ -13,6 +13,7 @@ Supports:
 import argparse
 import contextlib
 import os
+import random
 import sys
 import re
 import urllib.error
@@ -38,6 +39,18 @@ except ImportError:
 
 
 DEFAULT_FAILURE_LIMIT = 10  # Conservative: give each client more tolerance before rotating
+
+# User-Agent rotation pool to appear as different browsers
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
+]
 
 
 @dataclass
@@ -112,6 +125,8 @@ class DownloadLogger:
         # Track 403 errors for rate limit detection
         self.http_403_count = 0
         self.http_403_timestamps: List[float] = []
+        # Track "video unavailable" errors for rate limit detection
+        self.unavailable_timestamps: List[float] = []
 
     def set_failure_callback(
         self, callback: Optional[Callable[[Optional[str]], None]]
@@ -133,28 +148,41 @@ class DownloadLogger:
 
     def check_rate_limit_backoff(self) -> Optional[int]:
         """
-        Check if we should pause due to rate limiting based on 403 error frequency.
+        Check if we should pause due to rate limiting based on 403 error count.
         Returns the number of seconds to wait, or None if no pause needed.
+
+        Implements exponential backoff:
+        - First 403: Wait 30 seconds
+        - Second 403: Wait 60 seconds
+        - Third 403: Wait 120 seconds
+        - Fourth+ 403: Should trigger client switch (handled by caller)
         """
-        if len(self.http_403_timestamps) < 3:
+        if self.http_403_count == 0:
             return None
 
-        # Check if we have 3+ 403 errors in the last 60 seconds
-        recent_window = time.time() - 60
-        recent_403s = sum(1 for ts in self.http_403_timestamps if ts > recent_window)
-
-        if recent_403s >= 3:
-            # Exponential backoff based on total 403 count
-            if self.http_403_count <= 3:
-                return 30  # First tier: 30 seconds
-            elif self.http_403_count <= 6:
-                return 120  # Second tier: 2 minutes
-            elif self.http_403_count <= 10:
-                return 300  # Third tier: 5 minutes
-            else:
-                return 600  # Fourth tier: 10 minutes
+        # Exponential backoff based on sequential 403 count
+        if self.http_403_count == 1:
+            return 30  # First 403: 30 seconds
+        elif self.http_403_count == 2:
+            return 60  # Second 403: 60 seconds
+        elif self.http_403_count >= 3:
+            return 120  # Third 403: 120 seconds (fourth triggers client switch)
 
         return None
+
+    def check_unavailable_rate_limiting(self) -> bool:
+        """
+        Check if we're seeing too many "video unavailable" errors in a short time window.
+        Returns True if we should pause for rate limiting (3+ errors in 10 seconds).
+        """
+        if len(self.unavailable_timestamps) < 3:
+            return False
+
+        # Check if we have 3+ unavailable errors in the last 10 seconds
+        recent_window = time.time() - 10
+        recent_unavailable = sum(1 for ts in self.unavailable_timestamps if ts > recent_window)
+
+        return recent_unavailable >= 3
 
     def set_video(self, video_id: Optional[str]) -> None:
         if video_id != self.current_video_id:
@@ -205,6 +233,12 @@ class DownloadLogger:
 
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
+            # Track timestamp for rate limiting detection
+            self.unavailable_timestamps.append(time.time())
+            # Keep only recent timestamps (last 60 seconds)
+            cutoff_time = time.time() - 60
+            self.unavailable_timestamps = [ts for ts in self.unavailable_timestamps if ts > cutoff_time]
+
             key = (video_id, lowered)
             if key == self._last_reported_failure:
                 return
@@ -824,6 +858,16 @@ def parse_args() -> argparse.Namespace:
             "Makes a single test request and reports results without downloading."
         ),
     )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="Use a single proxy for all requests (e.g., http://proxy.example.com:8080 or socks5://127.0.0.1:1080)",
+    )
+    parser.add_argument(
+        "--proxy-file",
+        default=None,
+        help="Path to a file containing proxy URLs (one per line). Proxies will be rotated randomly.",
+    )
     return parser.parse_args()
 
 
@@ -1006,6 +1050,54 @@ def select_format_for_client(args, player_client: Optional[str]) -> FormatSelect
     return FormatSelection(requested=requested, effective=requested)
 
 
+def select_random_user_agent() -> str:
+    """Select a random User-Agent from the pool to rotate through different browsers."""
+    return random.choice(USER_AGENTS)
+
+
+def load_proxies_from_file(proxy_file: str) -> List[str]:
+    """Load proxy URLs from a file, one per line."""
+    proxies: List[str] = []
+    try:
+        with open(proxy_file, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                # Skip empty lines and comments
+                if stripped and not stripped.startswith("#"):
+                    proxies.append(stripped)
+        if proxies:
+            print(f"Loaded {len(proxies)} proxies from {proxy_file}")
+        else:
+            print(f"Warning: No proxies found in {proxy_file}", file=sys.stderr)
+        return proxies
+    except FileNotFoundError:
+        print(f"Error: Proxy file not found: {proxy_file}", file=sys.stderr)
+        return []
+    except OSError as exc:
+        print(f"Error reading proxy file {proxy_file}: {exc}", file=sys.stderr)
+        return []
+
+
+def select_proxy(args) -> Optional[str]:
+    """
+    Select a proxy based on args.
+    Returns a single proxy URL, or None if no proxy is configured.
+    """
+    if args.proxy:
+        return args.proxy
+
+    proxy_file = getattr(args, "proxy_file", None)
+    if proxy_file:
+        # Load proxies and store in args to avoid re-reading the file
+        if not hasattr(args, "_proxy_pool"):
+            args._proxy_pool = load_proxies_from_file(proxy_file)
+
+        if args._proxy_pool:
+            return random.choice(args._proxy_pool)
+
+    return None
+
+
 def build_ydl_options(
     args,
     player_client: Optional[str],
@@ -1017,6 +1109,12 @@ def build_ydl_options(
         args.output,
         "%(channel)s/%(upload_date>%Y-%m-%d)s - %(title).200B [%(id)s].%(ext)s",
     )
+
+    # Rotate User-Agent to appear as different browsers
+    user_agent = select_random_user_agent()
+
+    # Select proxy if configured
+    proxy = select_proxy(args)
 
     ydl_opts = {
         "continuedl": True,
@@ -1036,7 +1134,14 @@ def build_ydl_options(
         "no_warnings": False,
         "logger": logger,
         "progress_hooks": [hook],
+        "http_headers": {
+            "User-Agent": user_agent,
+        },
     }
+
+    # Add proxy if configured
+    if proxy:
+        ydl_opts["proxy"] = proxy
 
     format_selection = select_format_for_client(args, player_client)
     format_selector = format_selection.effective
@@ -1208,6 +1313,14 @@ def build_ydl_options(
             )
         )
 
+    # Add user agent info to debug output
+    user_agent_short = user_agent.split('(')[0].strip() if '(' in user_agent else user_agent[:50]
+    debug_parts.append(f"user_agent={user_agent_short}")
+
+    # Add proxy info to debug output
+    if proxy:
+        debug_parts.append(f"proxy={proxy}")
+
     print(
         "Constructed yt-dlp options: "
         + ", ".join(debug_parts)
@@ -1353,13 +1466,49 @@ def run_download_attempt(
             rate_limit_pause_count += 1
             print(
                 f"\n{'='*80}\n"
-                f"⚠️  RATE LIMITING DETECTED: {len(logger.http_403_timestamps)} HTTP 403 errors detected.\n"
+                f"⚠️  RATE LIMITING DETECTED: HTTP 403 error #{logger.http_403_count} detected.\n"
                 f"Pausing for {backoff_seconds} seconds to avoid further blocking...\n"
                 f"{'='*80}",
                 file=sys.stderr
             )
             time.sleep(backoff_seconds)
             print(f"Resuming downloads after {backoff_seconds}s pause...\n")
+
+        # Check for excessive "video unavailable" errors indicating rate limiting
+        if logger.check_unavailable_rate_limiting():
+            rate_limit_pause_count += 1
+            pause_duration = 300  # 5 minutes
+            recent_count = len([ts for ts in logger.unavailable_timestamps if ts > time.time() - 10])
+            print(
+                f"\n{'='*80}\n"
+                f"⚠️  RATE LIMITING DETECTED: {recent_count} 'Video unavailable' errors in 10 seconds.\n"
+                f"This may indicate YouTube is rate limiting your requests.\n"
+                f"Pausing for {pause_duration} seconds (5 minutes) to avoid further blocking...\n"
+                f"{'='*80}",
+                file=sys.stderr
+            )
+            time.sleep(pause_duration)
+            print(f"Resuming downloads after {pause_duration}s pause...\n")
+            # Clear the timestamps after the pause
+            logger.unavailable_timestamps.clear()
+
+        # Check if we should force a client switch after 4 HTTP 403 errors
+        if logger.http_403_count >= 4 and not failure_limit_reached:
+            print(
+                f"\n{'='*80}\n"
+                f"⚠️  EXCESSIVE HTTP 403 ERRORS: {logger.http_403_count} errors detected.\n"
+                f"Forcing client switch to avoid further blocking...\n"
+                f"{'='*80}",
+                file=sys.stderr
+            )
+            failure_limit_reached = True
+            consecutive_limit_reached = True
+            failure_limit_reason = "http_403"
+            if interrupt:
+                raise DownloadCancelled(
+                    f"Forcing client switch after {logger.http_403_count} HTTP 403 errors"
+                )
+            return
 
         total_failures += 1
         consecutive_failures += 1
