@@ -305,6 +305,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Path to the BGUtil script provider",
     )
 
+    # Proxy options
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="Use a single proxy for all requests (e.g., http://proxy.example.com:8080 or socks5://127.0.0.1:1080)",
+    )
+    parser.add_argument(
+        "--proxy-file",
+        default=None,
+        help="Path to a file containing proxy URLs (one per line). Proxies will be rotated randomly.",
+    )
+
     args = parser.parse_args(argv)
 
     # Validate input
