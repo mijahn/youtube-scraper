@@ -8,6 +8,55 @@ Download all videos from one or more YouTube channels using [yt-dlp](https://git
 
 ---
 
+## ⭐ Recommended Approach (Don't Make Me Think!)
+
+**For most users, use this one-liner:**
+
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --output "./downloads" \
+  --cookies-from-browser chrome \
+  --youtube-client web
+```
+
+This works well for up to 50 channels. The script handles rate limiting automatically with conservative defaults.
+
+---
+
+**For 50+ channels or if you've been rate-limited before, use the two-step approach:**
+
+```bash
+# Step 1: Run overnight (Friday night → Saturday morning)
+# This scans metadata slowly (one request every 2 minutes)
+python scan_channels.py \
+  --channels-file channels.txt \
+  --output metadata.json \
+  --request-interval 120 \
+  --cookies-from-browser chrome
+
+# Step 2: Run the next day (Saturday afternoon)
+# This downloads videos using cached metadata (no additional rate limit risk)
+python download_videos.py \
+  --metadata metadata.json \
+  --output "./downloads" \
+  --cookies-from-browser chrome \
+  --youtube-client web
+```
+
+**Why these settings?**
+- `--cookies-from-browser chrome` - Authenticates you with YouTube (essential)
+- `--youtube-client web` - Most reliable client (TV client gets rate-limited faster)
+- `--request-interval 120` - One request every 2 minutes (very safe)
+- Defaults include 2-8 second delays between downloads (already baked in)
+
+**Don't use the other scripts unless:**
+- `interactive_interface.py` - You want a menu to explore before downloading
+- `queue_manager.py` - You're getting many failures and need automatic retries
+- `health_check.py` - You want to test if you're currently rate-limited
+
+---
+
 ## 📚 Scripts Overview
 
 This project includes multiple scripts designed to work together. Here's what each one does:
@@ -146,94 +195,73 @@ This exponential backoff prevents harder blocks and usually resolves temporary r
 
 ---
 
-## ▶️ Usage
+## ▶️ Usage Examples
 
-### Single channel
+### Basic: Download single channel
 ```bash
 python download_channel_videos.py \
-  --url https://www.youtube.com/@PatrickOakleyEllis \
-  --output "/Volumes/Micha 4TB/youtube downloads" \
-  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
-  --cookies-from-browser chrome
-```
-
-### Multiple sources (local channels.txt)
-```bash
-python download_channel_videos.py \
-  --channels-file channels.txt \
-  --output "/Volumes/Micha 4TB/youtube downloads" \
-  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
-  --cookies-from-browser chrome
-```
-
-### Multiple sources (remote GitHub repo)
-If your `channels.txt` is in a public GitHub repo, copy the **raw** link, e.g.:
-
-```
-https://raw.githubusercontent.com/<username>/<repo>/main/channels.txt
-```
-
-Run:
-```bash
-python3 download_channel_videos.py \
-  --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
-  --output "/Volumes/Micha 4TB/youtube downloads" \
-  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
-  --cookies-from-browser chrome
-
-```
-
-### Ready-to-copy remote command with delays
-Need everything in one line-ready block? Copy the following command to pull the repo-hosted channel list while applying
-every available delay and client mitigation option:
-
-```bash
-python3 download_channel_videos.py \
-  --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
-  --output "/Volumes/Micha 4TB/youtube downloads" \
-  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
-  --youtube-fetch-po-token always \
+  --url "https://www.youtube.com/@YourChannelName" \
+  --output "./downloads" \
   --cookies-from-browser chrome \
-  --youtube-client web \
-  --sleep-requests 1.5 \
-  --sleep-interval 2 \
-  --max-sleep-interval 5
+  --youtube-client web
 ```
 
-### Advanced: Customizing Rate Limiting Behavior
-
-The script now includes **conservative defaults** designed for long-running unattended operation. These defaults are automatically applied, but you can customize them if needed:
-
-**Current defaults** (automatically applied):
-```bash
---sleep-requests 2.0        # 2 seconds between HTTP requests
---sleep-interval 3.0        # minimum 3 seconds between downloads
---max-sleep-interval 8.0    # maximum 8 seconds between downloads
---failure-limit 10          # allow 10 failures before switching clients
-```
-
-**To speed up downloads** (higher risk of blocking):
+### Recommended: Download from channels.txt file
 ```bash
 python download_channel_videos.py \
   --channels-file channels.txt \
+  --output "./downloads" \
+  --cookies-from-browser chrome \
+  --youtube-client web
+```
+
+**Note:** The `--archive` flag is optional (defaults to `<output>/.download-archive.txt`), so you don't need to specify it unless you want a custom location.
+
+### Advanced: Download from remote channels.txt (GitHub)
+If your `channels.txt` is hosted on GitHub, use the **raw** URL:
+
+```bash
+python download_channel_videos.py \
+  --channels-url "https://raw.githubusercontent.com/username/repo/main/channels.txt" \
+  --output "./downloads" \
+  --cookies-from-browser chrome \
+  --youtube-client web
+```
+
+### Only if needed: Customizing Rate Limiting
+
+**Default behavior (already safe):**
+- 2 seconds between HTTP requests
+- 3-8 seconds random delay between downloads
+- Automatic exponential backoff on errors
+
+**Only customize if you know what you're doing!**
+
+Speed up (⚠️ higher risk):
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --output "./downloads" \
   --sleep-requests 1.0 \
   --sleep-interval 1.0 \
   --max-sleep-interval 3.0 \
-  --youtube-client web \
-  --cookies-from-browser chrome
+  --cookies-from-browser chrome \
+  --youtube-client web
 ```
 
-**To slow down even more** (lowest risk, for very large batch downloads):
+Slow down more (100+ channels):
 ```bash
 python download_channel_videos.py \
   --channels-file channels.txt \
+  --output "./downloads" \
   --sleep-requests 3.0 \
   --sleep-interval 5.0 \
   --max-sleep-interval 15.0 \
-  --failure-limit 15 \
-  --youtube-client web \
-  --cookies-from-browser chrome
+  --cookies-from-browser chrome \
+  --youtube-client web
 ```
+
+**Recommendation:** Don't change these unless you're getting rate-limited. Use the two-step scan+download approach instead (see top of README).
 
 ### Automatic Rate Limit Detection
 
@@ -281,31 +309,24 @@ To use a different config file location:
 python download_channel_videos.py --config /path/to/my-config.json
 ```
 
-### Interactive menu for scanning & downloads
+### Interactive Menu (Optional)
 
-Prefer a guided workflow instead of calling `download_channel_videos.py` directly? The `interactive_interface.py` helper
-wraps the downloader and exposes three menu options:
-
-1. **Check for new videos** – scans every entry in your `channels.txt`, highlights sources you recently added, and shows how
-   many videos are already archived versus still pending.
-2. **Download videos from a specific source** – lists each source with its pending count, then triggers downloads for the one
-   you pick using the same flags you would pass to `download_channel_videos.py`.
-3. **Download all pending videos** – combines the previous two options by scanning first and then downloading everything that
-   has not been archived yet.
-
-Run the interface with the same arguments you normally pass to the downloader, for example:
+Want to explore before downloading? Use the interactive menu:
 
 ```bash
 python interactive_interface.py \
   --channels-file channels.txt \
-  --output "/Volumes/Micha 4TB/youtube downloads" \
-  --archive "/Volumes/Micha 4TB/youtube downloads/.downloaded.txt" \
+  --output "./downloads" \
   --cookies-from-browser chrome
 ```
 
-All command-line flags accepted by `download_channel_videos.py` are also supported here, so existing workflows continue to
-work while adding a quick way to inspect channel state or focus on a single source without remembering the specific yt-dlp
-commands.
+**Menu options:**
+1. Check for new videos (shows what's pending)
+2. Download from one specific channel
+3. Download all pending videos
+4. Run health check
+
+This is helpful when you want to see what's new before downloading everything.
 
 ### Preserving original formats
 
