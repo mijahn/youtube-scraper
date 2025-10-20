@@ -144,6 +144,8 @@ def build_args_from_options(options: argparse.Namespace) -> argparse.Namespace:
         bgutil_script_path=options.bgutil_script_path,
         bgutil_provider_candidates=[],
         bgutil_provider_resolved="disabled",
+        proxy=options.proxy,
+        proxy_file=options.proxy_file,
         watch_interval=options.watch_interval,
         failure_limit=options.failure_limit,
     )
@@ -509,6 +511,16 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
         "--bgutil-script-path",
         default=None,
         help="Path to the BGUtil script provider",
+    )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="Use a single proxy for all requests (e.g., http://proxy.example.com:8080 or socks5://127.0.0.1:1080)",
+    )
+    parser.add_argument(
+        "--proxy-file",
+        default=None,
+        help="Path to a file containing proxy URLs (one per line). Proxies will be rotated randomly.",
     )
     parser.add_argument(
         "--watch-interval",
