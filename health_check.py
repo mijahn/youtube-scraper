@@ -349,34 +349,21 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # Set defaults for attributes required by build_ydl_options
     # Health check only tests connectivity, not actual downloads
-    if not hasattr(args, 'output'):
-        args.output = '/tmp/health-check'  # Dummy output path
-    if not hasattr(args, 'skip_thumbs'):
-        args.skip_thumbs = True
-    if not hasattr(args, 'skip_subtitles'):
-        args.skip_subtitles = True
-    if not hasattr(args, 'allow_restricted'):
-        args.allow_restricted = False
-    if not hasattr(args, 'sleep_interval'):
-        args.sleep_interval = 0.0
-    if not hasattr(args, 'max_sleep_interval'):
-        args.max_sleep_interval = 0.0
-    if not hasattr(args, 'sleep_requests'):
-        args.sleep_requests = 0.0
-    if not hasattr(args, 'archive'):
-        args.archive = None
-    if not hasattr(args, 'rate_limit'):
-        args.rate_limit = None
-    if not hasattr(args, 'concurrency'):
-        args.concurrency = None
-    if not hasattr(args, 'since'):
-        args.since = None
-    if not hasattr(args, 'until'):
-        args.until = None
-    if not hasattr(args, 'merge_output_format'):
-        args.merge_output_format = None
-    if not hasattr(args, 'format'):
-        args.format = None
+    # These attributes are not in the parser but are required by build_ydl_options
+    args.output = '/tmp/health-check'  # Dummy output path
+    args.skip_thumbs = True
+    args.skip_subtitles = True
+    args.allow_restricted = False
+    args.sleep_interval = 0.0
+    args.max_sleep_interval = 0.0
+    args.sleep_requests = 0.0
+    args.archive = None
+    args.rate_limit = None
+    args.concurrency = None
+    args.since = None
+    args.until = None
+    args.merge_output_format = None
+    args.format = None
 
     return args
 

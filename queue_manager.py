@@ -597,12 +597,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     os.makedirs(args.output, exist_ok=True)
 
     # Set defaults for attributes required by build_ydl_options
-    if not hasattr(args, 'since'):
-        args.since = None
-    if not hasattr(args, 'until'):
-        args.until = None
-    if not hasattr(args, 'no_shorts'):
-        args.no_shorts = False
+    args.since = None
+    args.until = None
+    args.no_shorts = False
 
     return args
 
