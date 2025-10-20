@@ -294,6 +294,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
 
+    # Set defaults for attributes required by build_ydl_options
+    args.since = None
+    args.until = None
+    args.no_shorts = False
+
     return args
 
 

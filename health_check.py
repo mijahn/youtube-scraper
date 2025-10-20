@@ -347,6 +347,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     # Apply authentication defaults
     downloader.apply_authentication_defaults(args)
 
+    # Set defaults for attributes required by build_ydl_options
+    # Health check only tests connectivity, not actual downloads
+    # These attributes are not in the parser but are required by build_ydl_options
+    args.output = '/tmp/health-check'  # Dummy output path
+    args.skip_thumbs = True
+    args.skip_subtitles = True
+    args.allow_restricted = False
+    args.sleep_interval = 0.0
+    args.max_sleep_interval = 0.0
+    args.sleep_requests = 0.0
+    args.archive = None
+    args.rate_limit = None
+    args.concurrency = None
+    args.since = None
+    args.until = None
+    args.merge_output_format = None
+    args.format = None
+
     return args
 
 

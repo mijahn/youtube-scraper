@@ -314,6 +314,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     # Apply authentication defaults
     downloader.apply_authentication_defaults(args)
 
+    # Set defaults for attributes required by build_ydl_options
+    # These aren't used during metadata scanning but are checked by the builder
+    args.skip_thumbs = True  # Don't download thumbs during metadata scan
+    args.skip_subtitles = True  # Don't download subtitles during metadata scan
+    args.allow_restricted = False
+    args.sleep_interval = 0.0
+    args.max_sleep_interval = 0.0
+    args.archive = None
+    args.rate_limit = None
+    args.concurrency = None
+    args.since = None
+    args.until = None
+    args.merge_output_format = None
+    args.format = None
+
     return args
 
 
