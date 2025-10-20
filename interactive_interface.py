@@ -519,6 +519,14 @@ def parse_interface_args(argv: Optional[Sequence[str]] = None) -> argparse.Names
     return parser.parse_args(argv)
 
 
+def handle_option_four(config: InterfaceConfig) -> None:
+    """Run health check to test YouTube connectivity and rate limiting."""
+    print("\n" + "=" * 70)
+    print("Running Health Check...")
+    print("=" * 70)
+    downloader.run_health_check(config.args)
+
+
 def run_menu(config: InterfaceConfig) -> None:
     while True:
         print(
@@ -526,6 +534,7 @@ def run_menu(config: InterfaceConfig) -> None:
             "  1. Check for new videos\n"
             "  2. Download videos from a specific source\n"
             "  3. Download all pending videos\n"
+            "  4. Run health check (test rate limiting & authentication)\n"
             "  q. Quit\n"
         )
         choice = input("Enter your choice: ").strip().lower()
@@ -536,6 +545,8 @@ def run_menu(config: InterfaceConfig) -> None:
             handle_option_two(config)
         elif choice in {"3", "three"}:
             handle_option_three(config)
+        elif choice in {"4", "four"}:
+            handle_option_four(config)
         elif choice in {"q", "quit", "exit"}:
             print("Goodbye!")
             return

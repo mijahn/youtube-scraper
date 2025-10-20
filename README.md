@@ -275,3 +275,82 @@ playlist: https://www.youtube.com/playlist?list=PL01Ur3GaFSxyFumM3ywYF6MiJiOPpRd
 # favorite talks
 video: https://www.youtube.com/watch?v=Dif1hwBejCk
 ```
+
+---
+
+## 🏗️ Advanced Architecture Features (NEW!)
+
+The project now includes several advanced tools for better rate limit management and download reliability:
+
+### 1. **Separate Metadata Scanner** (`scan_channels.py`)
+
+Scan channel metadata **slowly** (overnight) to avoid rate limits, then download videos the next day using cached metadata.
+
+```bash
+# Scan channels slowly (recommended: 60-120 seconds between requests)
+python scan_channels.py --channels-file channels.txt --output metadata.json --request-interval 120
+
+# Download videos using cached metadata (no additional metadata requests!)
+python download_videos.py --metadata metadata.json
+```
+
+**Benefits:**
+- Scan slowly overnight without triggering rate limits
+- Separate metadata collection from video downloads
+- Retry downloads without re-scanning
+- Cache metadata for multiple download attempts
+
+### 2. **Queue-Based Download Manager** (`queue_manager.py`)
+
+Persistent download queue with automatic retry and exponential backoff.
+
+```bash
+# Populate queue from metadata
+python queue_manager.py --populate --metadata metadata.json
+
+# Start downloading (handles retries automatically)
+python queue_manager.py --download
+
+# Check queue status
+python queue_manager.py --status
+```
+
+**Benefits:**
+- Persistent queue survives restarts
+- Exponential retry for failed downloads
+- Track download progress and failures
+- Configurable retry limits
+
+### 3. **Health Check Mode** (`health_check.py`)
+
+Test if you're currently rate limited by YouTube.
+
+```bash
+# Run health check
+python health_check.py
+
+# With authentication
+python health_check.py --cookies-from-browser chrome
+```
+
+**Benefits:**
+- Detect rate limiting before starting downloads
+- Test authentication status
+- Get estimated wait time recommendations
+- Single test request (minimal impact)
+
+### 📚 Complete Documentation
+
+For detailed usage, workflows, and best practices, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+**Recommended workflow for large channel lists:**
+
+```bash
+# Step 1: Scan channels overnight (slow, safe)
+python scan_channels.py --channels-file channels.txt --output metadata.json --request-interval 120
+
+# Step 2: Download videos next day (fast, uses cached metadata)
+python download_videos.py --metadata metadata.json --output ./downloads
+```
+
+---
