@@ -2195,6 +2195,94 @@ class RemoteSourceError(Exception):
     """Raised when a remote channels list cannot be retrieved or parsed."""
 
 
+def download_videos_from_urls(video_urls: List[str], args) -> None:
+    """
+    Download videos from a list of video URLs.
+
+    This is a simplified version of download_source() for direct video URL downloads.
+    Used by download_videos.py and queue_manager.py.
+    """
+
+    if not video_urls:
+        print("No videos to download.")
+        return
+
+    print(f"\n=== Starting downloads for {len(video_urls)} video(s) ===")
+
+    # Determine client rotation strategy
+    client_attempts: List[Optional[str]]
+    available_clients = list(PLAYER_CLIENT_CHOICES)
+    if args.youtube_client:
+        preferred = args.youtube_client
+        remaining = [client for client in available_clients if client != preferred]
+        client_attempts = [preferred] + remaining
+    else:
+        default_sequence = list(DEFAULT_PLAYER_CLIENTS)
+        additional = [client for client in available_clients if client not in default_sequence]
+        client_attempts = default_sequence + additional
+
+    # Load download archive
+    archive_path = getattr(args, "archive", None)
+    downloaded_ids: Set[str] = set()
+    if archive_path:
+        previously_downloaded = _load_download_archive(archive_path)
+        downloaded_ids.update(previously_downloaded)
+        if previously_downloaded:
+            print(f"Found {len(previously_downloaded)} previously downloaded videos in archive.")
+
+    # Filter out already downloaded videos
+    filtered_urls = []
+    for url in video_urls:
+        # Extract video ID from URL
+        import re
+        match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
+        if match:
+            video_id = match.group(1)
+            if video_id not in downloaded_ids:
+                filtered_urls.append(url)
+        else:
+            # Include URLs we can't parse (let yt-dlp handle them)
+            filtered_urls.append(url)
+
+    if not filtered_urls:
+        print("All videos already downloaded (found in archive).")
+        return
+
+    print(f"Videos to download (after archive filter): {len(filtered_urls)}")
+
+    # Track session stats
+    total_downloaded = 0
+    total_failed = 0
+
+    # Download each video
+    for idx, url in enumerate(filtered_urls, start=1):
+        print(f"\n[{idx}/{len(filtered_urls)}] Downloading {url}")
+
+        # Create pseudo-source for this video
+        try:
+            video_source = Source(kind=SourceType.VIDEO, url=url)
+
+            # Use download_source to leverage existing download logic
+            # We'll create a temporary args copy to avoid max limit issues
+            temp_args = argparse.Namespace(**vars(args))
+            temp_args.max = 1  # Download only this one video
+
+            download_source(video_source, temp_args)
+            total_downloaded += 1
+
+        except Exception as exc:
+            print(f"Failed to download {url}: {exc}", file=sys.stderr)
+            total_failed += 1
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("Download Summary")
+    print("=" * 70)
+    print(f"Successfully downloaded: {total_downloaded}")
+    print(f"Failed: {total_failed}")
+    print("=" * 70)
+
+
 def load_sources_from_url(url: str) -> Tuple[List[Source], List[str]]:
     print(f"\nFetching source list from {url} ...")
 
