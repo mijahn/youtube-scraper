@@ -13,9 +13,9 @@ Download all videos from one or more YouTube channels using [yt-dlp](https://git
 **For most users, use this one-liner:**
 
 ```bash
-python download_channel_videos.py \
-  --channels-file channels.txt \
-  --output "./downloads" \
+python3 download_channel_videos.py \
+  --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
   --cookies-from-browser chrome \
   --youtube-client web
 ```
@@ -29,8 +29,8 @@ This works well for up to 50 channels. The script handles rate limiting automati
 ```bash
 # Step 1: Run overnight (Friday night → Saturday morning)
 # This scans metadata slowly (one request every 2 minutes)
-python scan_channels.py \
-  --channels-file channels.txt \
+python3 scan_channels.py \
+  --channels-url https://raw.githubusercontent.com/mijahn/youtube-scraper/main/channels.txt \
   --output metadata.json \
   --request-interval 120 \
   --cookies-from-browser chrome
@@ -39,7 +39,7 @@ python scan_channels.py \
 # This downloads videos using cached metadata (no additional rate limit risk)
 python download_videos.py \
   --metadata metadata.json \
-  --output "./downloads" \
+  --output "/Volumes/Micha 4TB/youtube downloads" \
   --cookies-from-browser chrome \
   --youtube-client web
 ```
@@ -506,7 +506,7 @@ python interactive_interface.py \
 python health_check.py
 
 # With authentication
-python health_check.py --cookies-from-browser chrome --youtube-client web
+python3 health_check.py --cookies-from-browser chrome --youtube-client web
 ```
 
 **When to use:**
