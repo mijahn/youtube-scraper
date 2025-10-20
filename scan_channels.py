@@ -20,7 +20,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import download_channel_videos as downloader
 
@@ -53,6 +53,7 @@ def scan_single_source(
     args: argparse.Namespace,
     player_client: Optional[str],
     request_interval: float,
+    error_analyzer: Optional[downloader.ErrorAnalyzer] = None,
 ) -> ChannelMetadata:
     """Scan a single source and return its metadata."""
 
@@ -61,6 +62,8 @@ def scan_single_source(
         display_url = downloader.normalize_url(source.url)
     except ValueError as exc:
         print(f"Error: Invalid URL ({source.url!r}): {exc}", file=sys.stderr)
+        if error_analyzer:
+            error_analyzer.categorize_and_record(None, str(exc))
         return ChannelMetadata(
             url=source.url,
             kind=source.kind.value,
@@ -78,7 +81,9 @@ def scan_single_source(
     args.sleep_requests = request_interval
 
     try:
-        video_entries = downloader.collect_all_video_ids(urls, args, player_client)
+        video_entries = downloader.collect_all_video_ids(
+            urls, args, player_client, error_analyzer=error_analyzer
+        )
 
         # Convert VideoMetadata objects to dicts
         videos = [
@@ -101,6 +106,8 @@ def scan_single_source(
 
     except Exception as exc:
         print(f"Error scanning {display_url}: {exc}", file=sys.stderr)
+        if error_analyzer:
+            error_analyzer.categorize_and_record(None, str(exc))
         return ChannelMetadata(
             url=display_url,
             kind=source.kind.value,
@@ -115,8 +122,18 @@ def scan_single_source(
 def scan_all_channels(
     args: argparse.Namespace,
     request_interval: float,
-) -> MetadataCache:
-    """Scan all channels and return cached metadata."""
+) -> Tuple[MetadataCache, downloader.ErrorAnalyzer]:
+    """Scan all channels and return cached metadata with error analysis."""
+
+    # Initialize error analyzer
+    error_analyzer = downloader.ErrorAnalyzer()
+
+    # Set up error log path
+    output_dir = os.path.dirname(args.output) if os.path.dirname(args.output) else "."
+    error_log_path = os.path.join(output_dir, "scan_errors.log")
+    error_analyzer.set_error_log_path(error_log_path)
+
+    print(f"Error logging enabled: {error_log_path}")
 
     # Load sources
     sources: List[downloader.Source]
@@ -145,6 +162,8 @@ def scan_all_channels(
     elif downloader.DEFAULT_PLAYER_CLIENTS:
         player_client = downloader.DEFAULT_PLAYER_CLIENTS[0]
 
+    print(f"Using player client: {player_client or 'default'}")
+
     # Scan each source
     total_sources = len(sources)
     channel_metadata: List[ChannelMetadata] = []
@@ -153,7 +172,9 @@ def scan_all_channels(
     for idx, source in enumerate(sources, start=1):
         print(f"\n[scan {idx}/{total_sources}] Scanning {source.url}")
 
-        metadata = scan_single_source(source, args, player_client, request_interval)
+        metadata = scan_single_source(
+            source, args, player_client, request_interval, error_analyzer
+        )
         channel_metadata.append(metadata)
 
         if not metadata.error:
@@ -164,11 +185,14 @@ def scan_all_channels(
             print(f"[scan] Waiting {request_interval}s before next source...")
             time.sleep(request_interval)
 
-    return MetadataCache(
-        scan_date=datetime.now().isoformat(),
-        channels=channel_metadata,
-        total_videos=total_videos,
-        total_channels=len(channel_metadata),
+    return (
+        MetadataCache(
+            scan_date=datetime.now().isoformat(),
+            channels=channel_metadata,
+            total_videos=total_videos,
+            total_channels=len(channel_metadata),
+        ),
+        error_analyzer,
     )
 
 
@@ -350,14 +374,15 @@ def main(argv=None) -> int:
     args = parse_args(argv)
 
     print("=" * 70)
-    print("YouTube Channel Metadata Scanner")
+    print("YouTube Channel Metadata Scanner (Enhanced)")
     print("=" * 70)
     print(f"Request interval: {args.request_interval}s (slow scanning to avoid rate limits)")
     print(f"Output file: {args.output}")
+    print(f"Features: Retry logic, client rotation, exponential backoff, error analysis")
     print("=" * 70)
 
     # Scan all channels
-    cache = scan_all_channels(args, args.request_interval)
+    cache, error_analyzer = scan_all_channels(args, args.request_interval)
 
     # Save metadata
     save_metadata(cache, args.output)
@@ -374,6 +399,10 @@ def main(argv=None) -> int:
         print(f"\nWarning: {len(failed_channels)} channel(s) failed to scan:")
         for ch in failed_channels:
             print(f"  - {ch.url}: {ch.error}")
+
+    # Print error analysis
+    if error_analyzer:
+        error_analyzer.print_summary()
 
     print("\nMetadata cache ready for download_videos.py")
     print("=" * 70)

@@ -77,6 +77,208 @@ class VideoMetadata:
     title: Optional[str] = None
 
 
+@dataclass
+class ErrorPattern:
+    """Tracks a specific error pattern and its occurrences."""
+    error_type: str
+    count: int = 0
+    video_ids: List[str] = field(default_factory=list)
+    sample_messages: List[str] = field(default_factory=list)
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+
+    def record(self, video_id: Optional[str], message: str) -> None:
+        """Record an occurrence of this error pattern."""
+        self.count += 1
+        timestamp = time.time()
+
+        if self.first_seen is None:
+            self.first_seen = timestamp
+        self.last_seen = timestamp
+
+        if video_id and video_id not in self.video_ids:
+            self.video_ids.append(video_id)
+
+        # Keep only the first 5 sample messages to avoid memory bloat
+        if len(self.sample_messages) < 5 and message not in self.sample_messages:
+            self.sample_messages.append(message)
+
+
+class ErrorAnalyzer:
+    """Analyzes error patterns and suggests remediation strategies."""
+
+    def __init__(self) -> None:
+        self.patterns: Dict[str, ErrorPattern] = {
+            "geo_restricted": ErrorPattern("geo_restricted"),
+            "age_restricted": ErrorPattern("age_restricted"),
+            "members_only": ErrorPattern("members_only"),
+            "private_deleted": ErrorPattern("private_deleted"),
+            "rate_limit": ErrorPattern("rate_limit"),
+            "po_token": ErrorPattern("po_token"),
+            "auth_required": ErrorPattern("auth_required"),
+            "unknown": ErrorPattern("unknown"),
+        }
+        self.total_errors = 0
+        self.error_log_path: Optional[str] = None
+
+    def set_error_log_path(self, path: str) -> None:
+        """Set the path for the detailed error log file."""
+        self.error_log_path = path
+
+    def categorize_and_record(self, video_id: Optional[str], error_message: str) -> str:
+        """Categorize an error and record it. Returns the error category."""
+        self.total_errors += 1
+        lowered = error_message.lower()
+
+        category = "unknown"
+
+        # Categorize the error
+        if any(x in lowered for x in ["not available in your country", "geo", "region"]):
+            category = "geo_restricted"
+        elif any(x in lowered for x in ["age", "sign in to confirm"]):
+            category = "age_restricted"
+        elif any(x in lowered for x in ["members only", "member", "subscription", "subscriber"]):
+            category = "members_only"
+        elif any(x in lowered for x in ["private", "deleted", "removed", "uploader has not made"]):
+            category = "private_deleted"
+        elif any(x in lowered for x in ["403", "forbidden", "too many requests", "rate limit"]):
+            category = "rate_limit"
+        elif any(x in lowered for x in ["po token", "po_token"]):
+            category = "po_token"
+        elif any(x in lowered for x in ["login required", "authentication"]):
+            category = "auth_required"
+
+        # Record the error
+        pattern = self.patterns[category]
+        pattern.record(video_id, error_message)
+
+        # Log to error file if configured
+        if self.error_log_path:
+            self._append_to_error_log(video_id, category, error_message)
+
+        return category
+
+    def _append_to_error_log(self, video_id: Optional[str], category: str, message: str) -> None:
+        """Append error details to the error log file."""
+        try:
+            timestamp = datetime.now().isoformat()
+            video_id_str = video_id or "unknown"
+            log_entry = f"[{timestamp}] [{category}] {video_id_str}: {message}\n"
+
+            with open(self.error_log_path, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception as e:
+            # Don't fail the scan if error logging fails
+            print(f"Warning: Failed to write to error log: {e}", file=sys.stderr)
+
+    def get_recommendations(self) -> List[str]:
+        """Generate recommendations based on error patterns."""
+        recommendations = []
+
+        if self.total_errors == 0:
+            return ["No errors detected - scan completed successfully!"]
+
+        # Analyze each pattern and provide specific recommendations
+        if self.patterns["geo_restricted"].count > 0:
+            recommendations.append(
+                f"🌍 Geo-restriction ({self.patterns['geo_restricted'].count} videos): "
+                "Use a VPN or proxy from a different region. Try --proxy with a different location."
+            )
+
+        if self.patterns["age_restricted"].count > 0:
+            recommendations.append(
+                f"🔞 Age-restricted ({self.patterns['age_restricted'].count} videos): "
+                "Ensure your browser cookies are fresh. Sign in to YouTube in your browser and retry. "
+                "Consider using --cookies-from-browser with a recently authenticated browser."
+            )
+
+        if self.patterns["members_only"].count > 0:
+            recommendations.append(
+                f"👥 Members-only ({self.patterns['members_only'].count} videos): "
+                "These videos require channel membership. Use --allow-restricted if you have membership "
+                "and are authenticated."
+            )
+
+        if self.patterns["private_deleted"].count > 0:
+            recommendations.append(
+                f"🗑️  Private/Deleted ({self.patterns['private_deleted'].count} videos): "
+                "These videos are no longer available. This is expected - channels often delete old content."
+            )
+
+        if self.patterns["rate_limit"].count > 0:
+            recommendations.append(
+                f"⏱️  Rate limiting ({self.patterns['rate_limit'].count} errors): "
+                "YouTube is detecting automated access. Increase --request-interval to 180-300 seconds. "
+                "Consider using a different proxy or adding more delay between requests."
+            )
+
+        if self.patterns["po_token"].count > 0:
+            recommendations.append(
+                f"🔑 PO Token issues ({self.patterns['po_token'].count} errors): "
+                "BGUtil may be failing. Check if BGUtil is running (curl http://127.0.0.1:4416). "
+                "Try --bgutil-http-disable-innertube or --bgutil-provider script. "
+                "Consider --youtube-fetch-po-token auto instead of always."
+            )
+
+        if self.patterns["auth_required"].count > 0:
+            recommendations.append(
+                f"🔐 Authentication ({self.patterns['auth_required'].count} videos): "
+                "These videos require login. Ensure --cookies-from-browser is working correctly. "
+                "Sign in to YouTube in your browser and try again."
+            )
+
+        if self.patterns["unknown"].count > 0:
+            recommendations.append(
+                f"❓ Unknown errors ({self.patterns['unknown'].count}): "
+                "Check the error log for details. May require manual investigation."
+            )
+
+        # Add percentage analysis
+        error_rate = (self.total_errors / max(1, self.total_errors)) * 100
+        if error_rate > 20:
+            recommendations.append(
+                f"\n⚠️  High error rate detected! Consider systematic fixes rather than individual retries."
+            )
+
+        return recommendations
+
+    def print_summary(self) -> None:
+        """Print a formatted summary of error patterns."""
+        if self.total_errors == 0:
+            print("\n✅ No errors detected during scan!")
+            return
+
+        print("\n" + "=" * 70)
+        print("Error Pattern Analysis")
+        print("=" * 70)
+        print(f"Total errors: {self.total_errors}\n")
+
+        # Sort patterns by count
+        sorted_patterns = sorted(
+            [(name, pattern) for name, pattern in self.patterns.items()],
+            key=lambda x: x[1].count,
+            reverse=True
+        )
+
+        for name, pattern in sorted_patterns:
+            if pattern.count > 0:
+                print(f"{name.replace('_', ' ').title()}: {pattern.count} occurrences")
+                print(f"  Affected videos: {len(pattern.video_ids)}")
+                if pattern.sample_messages:
+                    print(f"  Sample: {pattern.sample_messages[0][:80]}...")
+                print()
+
+        print("=" * 70)
+        print("Recommendations")
+        print("=" * 70)
+        for rec in self.get_recommendations():
+            print(f"{rec}\n")
+        print("=" * 70)
+
+        if self.error_log_path:
+            print(f"\nDetailed error log: {self.error_log_path}")
+
+
 class DownloadLogger:
     """Custom logger that tracks repeated 'Video unavailable' errors."""
 
@@ -113,6 +315,7 @@ class DownloadLogger:
         self,
         failure_callback: Optional[Callable[[Optional[str]], None]] = None,
         detection_callback: Optional[Callable[[str], None]] = None,
+        error_analyzer: Optional[ErrorAnalyzer] = None,
     ) -> None:
         self.video_unavailable_errors = 0
         self.other_errors = 0
@@ -122,6 +325,7 @@ class DownloadLogger:
         self.retryable_error_ids: Set[str] = set()
         self._failure_callback = failure_callback
         self._detection_callback = detection_callback
+        self._error_analyzer = error_analyzer
         self._last_reported_failure: Optional[Tuple[Optional[str], str]] = None
         # Track 403 errors for rate limit detection
         self.http_403_count = 0
@@ -240,6 +444,10 @@ class DownloadLogger:
             cutoff_time = time.time() - 60
             self.unavailable_timestamps = [ts for ts in self.unavailable_timestamps if ts > cutoff_time]
 
+            # Record in error analyzer if available
+            if self._error_analyzer:
+                self._error_analyzer.categorize_and_record(video_id, text)
+
             key = (video_id, lowered)
             if key == self._last_reported_failure:
                 return
@@ -255,8 +463,14 @@ class DownloadLogger:
         if is_retryable:
             if video_id:
                 self.retryable_error_ids.add(video_id)
+            # Record retryable errors in analyzer
+            if self._error_analyzer:
+                self._error_analyzer.categorize_and_record(video_id, text)
         else:
             self.other_errors += 1
+            # Record other errors in analyzer
+            if self._error_analyzer:
+                self._error_analyzer.categorize_and_record(video_id, text)
 
         self._last_reported_failure = key
         if self._failure_callback:
@@ -333,50 +547,135 @@ def _collect_video_ids_from_info(
 
 
 def collect_all_video_ids(
-    urls: Iterable[str], args, player_client: Optional[str]
+    urls: Iterable[str],
+    args,
+    player_client: Optional[str],
+    error_analyzer: Optional[ErrorAnalyzer] = None,
 ) -> List[VideoMetadata]:
-    """Fetch playlist metadata to determine every video entry for the given URLs."""
+    """
+    Fetch playlist metadata to determine every video entry for the given URLs.
+    Enhanced with retry logic, client rotation, and exponential backoff.
+    """
 
-    logger = DownloadLogger()
+    logger = DownloadLogger(error_analyzer=error_analyzer)
 
     def noop_hook(_):
         return None
-
-    ydl_opts = build_ydl_options(args, player_client, logger, noop_hook)
-
-    ydl_opts["skip_download"] = True
-    ydl_opts["quiet"] = True
-    ydl_opts["no_warnings"] = True
-    ydl_opts["progress_hooks"] = []
-    ydl_opts["writethumbnail"] = False
-    ydl_opts["writesubtitles"] = False
-    ydl_opts["writeautomaticsub"] = False
-    ydl_opts.pop("download_archive", None)
-    ydl_opts.pop("match_filter", None)
 
     video_metadata: List[VideoMetadata] = []
     seen_ids: Set[str] = set()
 
     # Get the sleep delay for metadata scanning (use sleep_requests value)
-    metadata_scan_delay = getattr(args, "sleep_requests", 2.0) or 2.0
+    base_delay = getattr(args, "sleep_requests", 2.0) or 2.0
+    current_delay = base_delay
+
+    # Track consecutive failures for exponential backoff
+    consecutive_failures = 0
+    max_backoff_delay = base_delay * 8  # Cap at 8x the base delay
+
+    # Get available player clients for retry
+    available_clients = list(DEFAULT_PLAYER_CLIENTS) if not player_client else [player_client]
+    client_idx = 0
+    current_client = available_clients[client_idx] if available_clients else player_client
+
+    urls_list = list(urls)
+    total_urls = len(urls_list)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for idx, url in enumerate(urls):
-                # Add delay between metadata requests to avoid rate limiting
-                if idx > 0:
-                    print(f"[metadata scan] Waiting {metadata_scan_delay}s before next request to avoid rate limiting...")
-                    time.sleep(metadata_scan_delay)
+        for idx, url in enumerate(urls_list):
+            # Add delay between metadata requests to avoid rate limiting
+            if idx > 0:
+                if consecutive_failures > 0:
+                    print(f"[metadata scan] Exponential backoff: waiting {current_delay:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
+                else:
+                    print(f"[metadata scan] Waiting {current_delay:.1f}s before next request to avoid rate limiting...")
+                time.sleep(current_delay)
 
+            # Try to extract info with retry logic
+            max_retries = min(3, len(available_clients))  # Retry up to 3 times or number of clients
+            retry_count = 0
+            success = False
+
+            while retry_count < max_retries and not success:
                 try:
-                    info = ydl.extract_info(url, download=False)
+                    # Build options for current client
+                    ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
+                    ydl_opts["skip_download"] = True
+                    ydl_opts["quiet"] = True
+                    ydl_opts["no_warnings"] = True
+                    ydl_opts["progress_hooks"] = []
+                    ydl_opts["writethumbnail"] = False
+                    ydl_opts["writesubtitles"] = False
+                    ydl_opts["writeautomaticsub"] = False
+                    ydl_opts.pop("download_archive", None)
+                    ydl_opts.pop("match_filter", None)
+
+                    logger.set_context(url, current_client)
+
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        if retry_count > 0:
+                            print(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
+
+                        info = ydl.extract_info(url, download=False)
+                        _collect_video_ids_from_info(info, video_metadata, seen_ids)
+
+                        # Success! Reset failure tracking
+                        consecutive_failures = 0
+                        current_delay = base_delay
+                        success = True
+
                 except (DownloadError, ExtractorError) as exc:
+                    error_msg = str(exc)
                     logger.record_exception(exc)
-                    continue
+
+                    retry_count += 1
+
+                    # Check if this is a retryable error
+                    is_retryable = any(
+                        fragment in error_msg.lower()
+                        for fragment in ["403", "forbidden", "po token", "login required"]
+                    )
+
+                    if is_retryable and retry_count < max_retries:
+                        # Rotate to next client
+                        client_idx = (client_idx + 1) % len(available_clients)
+                        current_client = available_clients[client_idx]
+                        print(f"[metadata scan] Retryable error detected, switching to client '{current_client}'")
+
+                        # Add a short backoff before retry
+                        retry_delay = min(5 * retry_count, 15)
+                        print(f"[metadata scan] Waiting {retry_delay}s before retry...")
+                        time.sleep(retry_delay)
+                    else:
+                        # Not retryable or out of retries
+                        print(f"[metadata scan] Failed to extract info from {url} after {retry_count} attempts")
+                        break
+
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.record_exception(exc)
-                    continue
-                _collect_video_ids_from_info(info, video_metadata, seen_ids)
+                    retry_count += 1
+
+                    if retry_count < max_retries:
+                        print(f"[metadata scan] Unexpected error, retrying with different client...")
+                        client_idx = (client_idx + 1) % len(available_clients)
+                        current_client = available_clients[client_idx]
+                        time.sleep(5)
+                    else:
+                        break
+
+            # Update exponential backoff based on success/failure
+            if not success:
+                consecutive_failures += 1
+                # Exponential backoff: double the delay for each consecutive failure
+                current_delay = min(base_delay * (2 ** consecutive_failures), max_backoff_delay)
+                print(f"[metadata scan] Failed to process URL {idx+1}/{total_urls}, increasing delay to {current_delay:.1f}s")
+            else:
+                # Success - reset exponential backoff but maintain base delay
+                if consecutive_failures > 0:
+                    print(f"[metadata scan] Success after {consecutive_failures} consecutive failures, resetting delay")
+                consecutive_failures = 0
+                current_delay = base_delay
+
     except KeyboardInterrupt:
         raise
 
