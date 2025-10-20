@@ -364,6 +364,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     args.until = None
     args.merge_output_format = None
     args.format = None
+    args.proxy = None
+    args.proxy_file = None
 
     return args
 
