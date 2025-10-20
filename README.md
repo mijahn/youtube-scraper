@@ -8,6 +8,53 @@ Download all videos from one or more YouTube channels using [yt-dlp](https://git
 
 ---
 
+## ⚠️ CRITICAL: Avoiding YouTube Rate Limiting & Blocks
+
+**This script now includes conservative rate limiting defaults to prevent YouTube from blocking your requests.**
+
+### Default Anti-Blocking Settings (Automatically Applied):
+- **2 seconds** delay between HTTP requests during metadata scanning
+- **3-8 seconds** randomized delay between video downloads
+- **10 consecutive failures** allowed before switching YouTube player clients
+- **Exponential backoff** on HTTP 403 errors (pauses 30s to 10 minutes automatically)
+- **Reduced retry attempts** to avoid aggressive patterns
+
+### ✅ Best Practices for Long-Running Unattended Downloads:
+
+1. **Always use browser cookies** for authenticated requests:
+   ```bash
+   --cookies-from-browser chrome
+   ```
+
+2. **Use the web client** instead of TV (TV client is more aggressively rate-limited):
+   ```bash
+   --youtube-client web
+   ```
+
+3. **Enable PO token support** for integrity verification:
+   ```bash
+   --youtube-fetch-po-token always
+   ```
+
+4. **Monitor the session statistics** shown at the end of downloads to see if rate limiting occurred
+
+5. **If you need faster downloads**, you can reduce delays, but **expect more blocking**:
+   ```bash
+   --sleep-requests 1.0 --sleep-interval 1.0 --max-sleep-interval 3.0
+   ```
+
+### What Happens When YouTube Blocks You?
+
+The script will **automatically detect** HTTP 403 errors and:
+- Pause for 30 seconds on first detection
+- Pause for 2 minutes after 3-6 errors
+- Pause for 5 minutes after 7-10 errors
+- Pause for 10 minutes after 10+ errors
+
+This exponential backoff prevents harder blocks and usually resolves temporary rate limiting.
+
+---
+
 ## ▶️ Usage
 
 ### Single channel
@@ -62,32 +109,53 @@ python3 download_channel_videos.py \
   --max-sleep-interval 5
 ```
 
-### Avoiding temporary rate limiting
-YouTube can temporarily block unauthenticated scraping when too many requests are made in a short period, or when the wrong
-player client is used. A few options have been added to help mitigate this:
+### Advanced: Customizing Rate Limiting Behavior
 
+The script now includes **conservative defaults** designed for long-running unattended operation. These defaults are automatically applied, but you can customize them if needed:
+
+**Current defaults** (automatically applied):
+```bash
+--sleep-requests 2.0        # 2 seconds between HTTP requests
+--sleep-interval 3.0        # minimum 3 seconds between downloads
+--max-sleep-interval 8.0    # maximum 8 seconds between downloads
+--failure-limit 10          # allow 10 failures before switching clients
+```
+
+**To speed up downloads** (higher risk of blocking):
 ```bash
 python download_channel_videos.py \
   --channels-file channels.txt \
-  --sleep-requests 1.5 \   # wait between HTTP requests
-  --sleep-interval 2 \     # random sleep between downloads (min)
-  --max-sleep-interval 5 \ # random sleep between downloads (max)
-  --youtube-client web \   # force the regular web client instead of TV
+  --sleep-requests 1.0 \
+  --sleep-interval 1.0 \
+  --max-sleep-interval 3.0 \
+  --youtube-client web \
   --cookies-from-browser chrome
 ```
 
-The downloader now automatically retries with different YouTube player clients when every download in a batch fails with
-`Video unavailable` so you don't have to restart manually. If rate limits persist, try the following adjustments:
+**To slow down even more** (lowest risk, for very large batch downloads):
+```bash
+python download_channel_videos.py \
+  --channels-file channels.txt \
+  --sleep-requests 3.0 \
+  --sleep-interval 5.0 \
+  --max-sleep-interval 15.0 \
+  --failure-limit 15 \
+  --youtube-client web \
+  --cookies-from-browser chrome
+```
 
-- **Use browser cookies** (`--cookies-from-browser chrome`) so requests look like a real logged-in session.
-- **Slow down the request rate** with the sleep options shown above.
-- **Force the `web` player client** via `--youtube-client web` to avoid the TV client that Google often rate limits.
-- **Leverage yt-dlp's PO Token support** with `--youtube-fetch-po-token always` so the new 2025.9.26 release proactively
-  requests integrity tokens for clients that need them, or pass your own tokens via `--youtube-po-token
-  CLIENT.CONTEXT+TOKEN` when integrating an external provider.
-- **Increase the error tolerance** with `--failure-limit 8` (or another positive number) when you expect brief hiccups and
-  prefer to give each player client more chances before rotating to the next option.
-- If the limits persist, pause the script for a few hours and resume later (using `--archive` avoids re-downloading files).
+### Automatic Rate Limit Detection
+
+The downloader automatically:
+- Retries with different YouTube player clients when downloads fail
+- Detects HTTP 403 patterns and pauses with exponential backoff
+- Switches clients after reaching the failure limit
+- Displays session statistics showing client rotations and rate limit pauses
+
+If temporary rate limits persist despite automatic backoff:
+- The script will show a warning message with pause duration
+- After pausing, downloads resume automatically
+- Use the archive file (`--archive`) to avoid re-downloading on restarts
 
 ### Interactive menu for scanning & downloads
 

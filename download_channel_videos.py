@@ -37,7 +37,7 @@ except ImportError:
     sys.exit(1)
 
 
-DEFAULT_FAILURE_LIMIT = 5
+DEFAULT_FAILURE_LIMIT = 10  # Conservative: give each client more tolerance before rotating
 
 
 @dataclass
@@ -54,6 +54,7 @@ class DownloadAttempt:
     failure_limit_reached: bool = False
     consecutive_limit_reached: bool = False
     failure_limit: int = DEFAULT_FAILURE_LIMIT
+    rate_limit_pauses: int = 0
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,9 @@ class DownloadLogger:
         self._failure_callback = failure_callback
         self._detection_callback = detection_callback
         self._last_reported_failure: Optional[Tuple[Optional[str], str]] = None
+        # Track 403 errors for rate limit detection
+        self.http_403_count = 0
+        self.http_403_timestamps: List[float] = []
 
     def set_failure_callback(
         self, callback: Optional[Callable[[Optional[str]], None]]
@@ -126,6 +130,31 @@ class DownloadLogger:
         self.current_client = client
         self.current_video_id = video_id
         self._last_reported_failure = None
+
+    def check_rate_limit_backoff(self) -> Optional[int]:
+        """
+        Check if we should pause due to rate limiting based on 403 error frequency.
+        Returns the number of seconds to wait, or None if no pause needed.
+        """
+        if len(self.http_403_timestamps) < 3:
+            return None
+
+        # Check if we have 3+ 403 errors in the last 60 seconds
+        recent_window = time.time() - 60
+        recent_403s = sum(1 for ts in self.http_403_timestamps if ts > recent_window)
+
+        if recent_403s >= 3:
+            # Exponential backoff based on total 403 count
+            if self.http_403_count <= 3:
+                return 30  # First tier: 30 seconds
+            elif self.http_403_count <= 6:
+                return 120  # Second tier: 2 minutes
+            elif self.http_403_count <= 10:
+                return 300  # Third tier: 5 minutes
+            else:
+                return 600  # Fourth tier: 10 minutes
+
+        return None
 
     def set_video(self, video_id: Optional[str]) -> None:
         if video_id != self.current_video_id:
@@ -165,6 +194,15 @@ class DownloadLogger:
         is_retryable = any(
             fragment in lowered for fragment in self.RETRYABLE_FRAGMENTS
         )
+
+        # Track HTTP 403 errors specifically for rate limit detection
+        if "http error 403" in lowered or "forbidden" in lowered:
+            self.http_403_count += 1
+            self.http_403_timestamps.append(time.time())
+            # Keep only recent timestamps (last 10 minutes)
+            cutoff_time = time.time() - 600
+            self.http_403_timestamps = [ts for ts in self.http_403_timestamps if ts > cutoff_time]
+
         if any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS):
             self.video_unavailable_errors += 1
             key = (video_id, lowered)
@@ -284,9 +322,17 @@ def collect_all_video_ids(
     video_metadata: List[VideoMetadata] = []
     seen_ids: Set[str] = set()
 
+    # Get the sleep delay for metadata scanning (use sleep_requests value)
+    metadata_scan_delay = getattr(args, "sleep_requests", 2.0) or 2.0
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for url in urls:
+            for idx, url in enumerate(urls):
+                # Add delay between metadata requests to avoid rate limiting
+                if idx > 0:
+                    print(f"[metadata scan] Waiting {metadata_scan_delay}s before next request to avoid rate limiting...")
+                    time.sleep(metadata_scan_delay)
+
                 try:
                     info = ydl.extract_info(url, download=False)
                 except (DownloadError, ExtractorError) as exc:
@@ -656,20 +702,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sleep-requests",
         type=float,
-        default=None,
-        help="Seconds to sleep between HTTP requests (helps avoid rate limiting)",
+        default=2.0,  # Conservative default: 2 seconds between HTTP requests
+        help="Seconds to sleep between HTTP requests (default: 2.0, helps avoid rate limiting)",
     )
     parser.add_argument(
         "--sleep-interval",
         type=float,
-        default=None,
-        help="Minimum randomized sleep between video downloads",
+        default=3.0,  # Conservative default: minimum 3 seconds between downloads
+        help="Minimum randomized sleep between video downloads (default: 3.0)",
     )
     parser.add_argument(
         "--max-sleep-interval",
         type=float,
-        default=None,
-        help="Maximum randomized sleep between video downloads",
+        default=8.0,  # Conservative default: maximum 8 seconds between downloads
+        help="Maximum randomized sleep between video downloads (default: 8.0)",
     )
     parser.add_argument(
         "--failure-limit",
@@ -677,7 +723,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_FAILURE_LIMIT,
         help=(
             "Number of failed downloads allowed before switching to the next "
-            "YouTube client (default: 5)"
+            "YouTube client (default: 10)"
         ),
     )
     parser.add_argument(
@@ -769,6 +815,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=300.0,
         help="When using --channels-file, seconds between checks for updates (default: 300)",
+    )
+    parser.add_argument(
+        "--health-check",
+        action="store_true",
+        help=(
+            "Run a health check to test YouTube connectivity and rate limiting status. "
+            "Makes a single test request and reports results without downloading."
+        ),
     )
     return parser.parse_args()
 
@@ -968,8 +1022,8 @@ def build_ydl_options(
         "continuedl": True,
         "ignoreerrors": "only_download",
         "noprogress": False,
-        "retries": 10,
-        "fragment_retries": 10,
+        "retries": 5,  # Reduced from 10 to 5 for more conservative behavior
+        "fragment_retries": 3,  # Reduced from 10 to 3 to avoid appearing aggressive
         "outtmpl": outtmpl,
         "restrictfilenames": True,
         "windowsfilenames": False,
@@ -1180,6 +1234,7 @@ def run_download_attempt(
     total_failures = 0
     consecutive_failures = 0
     failure_limit_reason: Optional[str] = None
+    rate_limit_pause_count = 0  # Track how many times we paused for rate limiting
     if failure_limit <= 0:
         failure_limit = DEFAULT_FAILURE_LIMIT
     seen_ids: Set[str]
@@ -1286,10 +1341,25 @@ def run_download_attempt(
         nonlocal total_failures
         nonlocal consecutive_failures
         nonlocal failure_limit_reason
+        nonlocal rate_limit_pause_count
         if failure_limit_reached:
             return
         if failed_video_id and failed_video_id in completed_ids:
             return
+
+        # Check for rate limiting and apply exponential backoff
+        backoff_seconds = logger.check_rate_limit_backoff()
+        if backoff_seconds:
+            rate_limit_pause_count += 1
+            print(
+                f"\n{'='*80}\n"
+                f"⚠️  RATE LIMITING DETECTED: {len(logger.http_403_timestamps)} HTTP 403 errors detected.\n"
+                f"Pausing for {backoff_seconds} seconds to avoid further blocking...\n"
+                f"{'='*80}",
+                file=sys.stderr
+            )
+            time.sleep(backoff_seconds)
+            print(f"Resuming downloads after {backoff_seconds}s pause...\n")
 
         total_failures += 1
         consecutive_failures += 1
@@ -1526,6 +1596,7 @@ def run_download_attempt(
         failure_limit_reached=failure_limit_reached,
         consecutive_limit_reached=consecutive_limit_reached,
         failure_limit=failure_limit,
+        rate_limit_pauses=rate_limit_pause_count,
     )
 
 
@@ -1638,6 +1709,11 @@ def download_source(source: Source, args) -> None:
     last_result: Optional[DownloadAttempt] = None
     archive_updated = False
 
+    # Session telemetry tracking
+    session_http_403_count = 0
+    session_client_rotations = 0
+    session_pauses_for_rate_limiting = 0
+
     total_client_attempts = len(client_attempts)
 
     def print_client_switch_banner(attempt_number: int, client_label: str) -> None:
@@ -1688,6 +1764,9 @@ def download_source(source: Source, args) -> None:
             if archive_path and result.downloaded_video_ids:
                 _write_download_archive(archive_path, downloaded_ids)
                 archive_updated = True
+
+            # Track session telemetry
+            session_pauses_for_rate_limiting += result.rate_limit_pauses
 
             print(
                 f"Attempt summary using {client_label!r} client: {format_attempt_summary(result)}"
@@ -1824,6 +1903,7 @@ def download_source(source: Source, args) -> None:
                 break
 
             if should_switch_client:
+                session_client_rotations += 1
                 break
 
             # Otherwise, loop again with the same client.
@@ -1877,6 +1957,19 @@ def download_source(source: Source, args) -> None:
         f"{value_color}{total_pending}{reset}"
     )
     print(border_line)
+    # Session telemetry
+    print(f"{label_color}Session Statistics:{reset}")
+    if session_client_rotations > 0:
+        print(f"  {label_color}Client rotations:{reset} {value_color}{session_client_rotations}{reset}")
+    if session_pauses_for_rate_limiting > 0:
+        print(f"  {label_color}Rate limit pauses:{reset} {value_color}{session_pauses_for_rate_limiting}{reset}")
+    # Count total retryable errors (HTTP 403s) across all attempts
+    total_retryable = len(last_result.retryable_error_ids) if last_result else 0
+    if total_retryable > 0:
+        print(f"  {label_color}HTTP 403 errors:{reset} {value_color}{total_retryable}{reset}")
+    avg_delay = args.sleep_requests or 2.0
+    print(f"  {label_color}Request delay:{reset} {value_color}{avg_delay}s{reset}")
+    print(border_line)
 
 
 class RemoteSourceError(Exception):
@@ -1885,11 +1978,23 @@ class RemoteSourceError(Exception):
 
 def load_sources_from_url(url: str) -> Tuple[List[Source], List[str]]:
     print(f"\nFetching source list from {url} ...")
-    try:
-        with urllib.request.urlopen(url) as response:
-            data = response.read().decode("utf-8")
-    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
-        raise RemoteSourceError(f"Failed to fetch source list from {url}: {exc}") from exc
+
+    # Retry with exponential backoff
+    max_retries = 4
+    base_delay = 2.0
+
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read().decode("utf-8")
+            break  # Success, exit retry loop
+        except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff: 2s, 4s, 8s, 16s
+                print(f"Failed to fetch (attempt {attempt + 1}/{max_retries}): {exc}. Retrying in {delay}s...", file=sys.stderr)
+                time.sleep(delay)
+            else:
+                raise RemoteSourceError(f"Failed to fetch source list from {url} after {max_retries} attempts: {exc}") from exc
 
     sources: List[Source] = []
     raw_lines: List[str] = []
@@ -1974,9 +2079,115 @@ def watch_channels_file(path: str, args) -> None:
         time.sleep(interval)
 
 
+def run_health_check(args) -> int:
+    """Run a health check to test YouTube connectivity and rate limiting."""
+
+    print("=" * 80)
+    print("YouTube Downloader Health Check".center(80))
+    print("=" * 80)
+    print()
+
+    # Test URL - use a popular, stable video that's unlikely to be removed
+    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    print(f"Testing connectivity with: {test_url}")
+    print(f"Using player client: {args.youtube_client or 'default'}")
+    print(f"Using cookies: {args.cookies_from_browser or 'none'}")
+    print(f"Sleep settings: requests={args.sleep_requests}s, interval={args.sleep_interval}-{args.max_sleep_interval}s")
+    print()
+
+    logger = DownloadLogger()
+
+    def noop_hook(_):
+        return None
+
+    player_client = args.youtube_client
+    ydl_opts = build_ydl_options(args, player_client, logger, noop_hook)
+    ydl_opts["skip_download"] = True
+    ydl_opts["quiet"] = True
+    ydl_opts["no_warnings"] = True
+
+    start_time = time.time()
+    success = False
+    error_message = None
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(test_url, download=False)
+            if info and info.get("id"):
+                success = True
+                video_title = info.get("title", "Unknown")
+                duration = info.get("duration", 0)
+                print(f"✓ Successfully retrieved metadata for: {video_title}")
+                print(f"✓ Video duration: {duration} seconds")
+                print(f"✓ Video ID: {info.get('id')}")
+    except (DownloadError, ExtractorError) as exc:
+        error_message = str(exc)
+        logger.record_exception(exc)
+    except Exception as exc:
+        error_message = str(exc)
+        logger.record_exception(exc)
+
+    elapsed = time.time() - start_time
+
+    print()
+    print("=" * 80)
+    print("Health Check Results".center(80))
+    print("=" * 80)
+
+    if success:
+        print(f"✓ Status: HEALTHY")
+        print(f"✓ Response time: {elapsed:.2f}s")
+        print(f"✓ YouTube API is accessible")
+        print(f"✓ No rate limiting detected")
+
+        if args.cookies_from_browser:
+            print(f"✓ Browser cookies loaded successfully")
+        else:
+            print(f"⚠ Not using browser cookies (consider --cookies-from-browser chrome)")
+
+        if args.youtube_client == "web":
+            print(f"✓ Using recommended 'web' client")
+        else:
+            print(f"ℹ Using client: {args.youtube_client or 'default'} (consider --youtube-client web)")
+
+        print()
+        print("Your configuration appears healthy. You should be able to download without issues.")
+        return 0
+    else:
+        print(f"✗ Status: UNHEALTHY")
+        print(f"✗ Response time: {elapsed:.2f}s")
+
+        if logger.http_403_count > 0:
+            print(f"✗ HTTP 403 errors detected: {logger.http_403_count}")
+            print(f"✗ Likely cause: Rate limiting or IP block")
+            print()
+            print("Recommendations:")
+            print("  1. Wait 10-30 minutes before trying again")
+            print("  2. Use browser cookies: --cookies-from-browser chrome")
+            print("  3. Use web client: --youtube-client web")
+            print("  4. Check if YouTube is accessible in your web browser")
+        elif logger.video_unavailable_errors > 0:
+            print(f"✗ Video unavailable errors: {logger.video_unavailable_errors}")
+            print(f"⚠ Test video may have been removed or is geo-restricted")
+        else:
+            print(f"✗ Error: {error_message or 'Unknown error'}")
+            print()
+            print("Recommendations:")
+            print("  1. Check your internet connection")
+            print("  2. Verify YouTube is accessible in your browser")
+            print("  3. Try using browser cookies: --cookies-from-browser chrome")
+
+        return 1
+
+
 def main() -> int:
     args = parse_args()
     apply_authentication_defaults(args)
+
+    # Handle health check mode
+    if args.health_check:
+        return run_health_check(args)
 
     if not args.archive:
         args.archive = os.path.join(args.output, ".download-archive.txt")
