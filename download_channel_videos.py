@@ -617,10 +617,8 @@ def collect_all_video_ids(
                         if retry_count > 0:
                             print(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
 
-                        # Show that we're starting the extraction (this can take time with PO token fetching)
+                        # Show that we're starting the extraction (this can take time)
                         print(f"[metadata scan] Extracting channel info from {url}...")
-                        if args.youtube_fetch_po_token == "always":
-                            print("[metadata scan] Note: PO token fetching is enabled - first request may take several minutes")
 
                         info = ydl.extract_info(url, download=False)
                         _collect_video_ids_from_info(info, video_metadata, seen_ids)
