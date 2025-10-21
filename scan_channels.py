@@ -350,6 +350,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     # Apply authentication defaults
     downloader.apply_authentication_defaults(args)
 
+    # Override BGUtil and PO token settings for metadata scanning
+    # These features can cause significant delays and are usually not needed for basic metadata extraction
+    if not hasattr(args, 'bgutil_provider') or args.bgutil_provider is None:
+        args.bgutil_provider = 'disabled'
+        args.bgutil_provider_candidates = []
+        args.bgutil_provider_resolved = 'disabled'
+    if not hasattr(args, 'youtube_fetch_po_token') or args.youtube_fetch_po_token is None:
+        args.youtube_fetch_po_token = 'auto'  # Changed from 'always' to 'auto'
+
     # Set defaults for attributes required by build_ydl_options
     # These aren't used during metadata scanning but are checked by the builder
     args.skip_thumbs = True  # Don't download thumbs during metadata scan
