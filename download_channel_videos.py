@@ -601,8 +601,9 @@ def collect_all_video_ids(
                     # Build options for current client
                     ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
                     ydl_opts["skip_download"] = True
-                    ydl_opts["quiet"] = True
-                    ydl_opts["no_warnings"] = True
+                    # Don't suppress output during metadata scanning - we want to see progress
+                    ydl_opts["quiet"] = False
+                    ydl_opts["no_warnings"] = False
                     ydl_opts["progress_hooks"] = []
                     ydl_opts["writethumbnail"] = False
                     ydl_opts["writesubtitles"] = False
@@ -615,6 +616,11 @@ def collect_all_video_ids(
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         if retry_count > 0:
                             print(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
+
+                        # Show that we're starting the extraction (this can take time with PO token fetching)
+                        print(f"[metadata scan] Extracting channel info from {url}...")
+                        if args.youtube_fetch_po_token == "always":
+                            print("[metadata scan] Note: PO token fetching is enabled - first request may take several minutes")
 
                         info = ydl.extract_info(url, download=False)
                         _collect_video_ids_from_info(info, video_metadata, seen_ids)
