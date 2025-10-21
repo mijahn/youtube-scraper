@@ -113,6 +113,7 @@ class ErrorAnalyzer:
             "age_restricted": ErrorPattern("age_restricted"),
             "members_only": ErrorPattern("members_only"),
             "private_deleted": ErrorPattern("private_deleted"),
+            "video_unavailable": ErrorPattern("video_unavailable"),
             "rate_limit": ErrorPattern("rate_limit"),
             "po_token": ErrorPattern("po_token"),
             "auth_required": ErrorPattern("auth_required"),
@@ -132,7 +133,7 @@ class ErrorAnalyzer:
 
         category = "unknown"
 
-        # Categorize the error
+        # Categorize the error (order matters - more specific first)
         if any(x in lowered for x in ["not available in your country", "geo", "region"]):
             category = "geo_restricted"
         elif any(x in lowered for x in ["age", "sign in to confirm"]):
@@ -141,6 +142,8 @@ class ErrorAnalyzer:
             category = "members_only"
         elif any(x in lowered for x in ["private", "deleted", "removed", "uploader has not made"]):
             category = "private_deleted"
+        elif any(x in lowered for x in ["video unavailable", "content isn't available", "content is not available", "this content isn't available"]):
+            category = "video_unavailable"
         elif any(x in lowered for x in ["403", "forbidden", "too many requests", "rate limit"]):
             category = "rate_limit"
         elif any(x in lowered for x in ["po token", "po_token"]):
@@ -203,6 +206,17 @@ class ErrorAnalyzer:
             recommendations.append(
                 f"🗑️  Private/Deleted ({self.patterns['private_deleted'].count} videos): "
                 "These videos are no longer available. This is expected - channels often delete old content."
+            )
+
+        if self.patterns["video_unavailable"].count > 0:
+            recommendations.append(
+                f"⚠️  Video Unavailable ({self.patterns['video_unavailable'].count} videos): "
+                "YouTube is blocking access. This may indicate rate limiting or bot detection. "
+                "The script now automatically rotates clients and adds delays. "
+                "Try: (1) Increase --request-interval to 180-300 seconds, "
+                "(2) Use --cookies-from-browser with a recently authenticated browser, "
+                "(3) Add --proxy or --proxy-file to use different IP addresses, "
+                "(4) Reduce scan frequency and try again later."
             )
 
         if self.patterns["rate_limit"].count > 0:
@@ -578,6 +592,13 @@ def collect_all_video_ids(
     client_idx = 0
     current_client = available_clients[client_idx] if available_clients else player_client
 
+    # Track consecutive unavailable errors for client rotation
+    consecutive_unavailable_errors = 0
+    unavailable_error_threshold = 5  # Rotate client after 5 consecutive unavailable errors
+
+    # Track initial unavailable error count to detect new errors
+    initial_unavailable_count = logger.video_unavailable_errors
+
     urls_list = list(urls)
     total_urls = len(urls_list)
 
@@ -585,11 +606,15 @@ def collect_all_video_ids(
         for idx, url in enumerate(urls_list):
             # Add delay between metadata requests to avoid rate limiting
             if idx > 0:
+                # Add random jitter (±20%) to avoid predictable patterns
+                jitter = random.uniform(0.8, 1.2)
+                delay_with_jitter = current_delay * jitter
+
                 if consecutive_failures > 0:
-                    print(f"[metadata scan] Exponential backoff: waiting {current_delay:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
+                    print(f"[metadata scan] Exponential backoff: waiting {delay_with_jitter:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
                 else:
-                    print(f"[metadata scan] Waiting {current_delay:.1f}s before next request to avoid rate limiting...")
-                time.sleep(current_delay)
+                    print(f"[metadata scan] Waiting {delay_with_jitter:.1f}s before next request to avoid rate limiting...")
+                time.sleep(delay_with_jitter)
 
             # Try to extract info with retry logic
             max_retries = min(3, len(available_clients))  # Retry up to 3 times or number of clients
@@ -598,6 +623,9 @@ def collect_all_video_ids(
 
             while retry_count < max_retries and not success:
                 try:
+                    # Rotate user agent for each request to appear as different browsers
+                    selected_user_agent = random.choice(USER_AGENTS)
+
                     # Build options for current client
                     ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
                     ydl_opts["skip_download"] = True
@@ -610,7 +638,15 @@ def collect_all_video_ids(
                     ydl_opts.pop("download_archive", None)
                     ydl_opts.pop("match_filter", None)
 
+                    # Override user agent for this request
+                    if "http_headers" not in ydl_opts:
+                        ydl_opts["http_headers"] = {}
+                    ydl_opts["http_headers"]["User-Agent"] = selected_user_agent
+
                     logger.set_context(url, current_client)
+
+                    # Track unavailable errors before the request
+                    pre_request_unavailable_count = logger.video_unavailable_errors
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         if retry_count > 0:
@@ -618,6 +654,42 @@ def collect_all_video_ids(
 
                         info = ydl.extract_info(url, download=False)
                         _collect_video_ids_from_info(info, video_metadata, seen_ids)
+
+                        # Check if unavailable errors occurred during this request
+                        post_request_unavailable_count = logger.video_unavailable_errors
+                        new_unavailable_errors = post_request_unavailable_count - pre_request_unavailable_count
+
+                        if new_unavailable_errors > 0:
+                            consecutive_unavailable_errors += new_unavailable_errors
+                            print(f"[metadata scan] Detected {new_unavailable_errors} unavailable video(s) (consecutive: {consecutive_unavailable_errors})")
+
+                            # Check if we're being rate limited (many errors in short time)
+                            if logger.check_unavailable_rate_limiting():
+                                rate_limit_pause = 60  # Pause for 1 minute
+                                print(f"[metadata scan] ⚠️  Detected rapid unavailable errors - possible rate limiting!")
+                                print(f"[metadata scan] Pausing for {rate_limit_pause}s to avoid further rate limiting...")
+                                time.sleep(rate_limit_pause)
+                                # Clear old timestamps after pause
+                                logger.unavailable_timestamps = []
+
+                            # Check if we should rotate client due to too many unavailable errors
+                            if consecutive_unavailable_errors >= unavailable_error_threshold:
+                                if len(available_clients) > 1:
+                                    old_client = current_client
+                                    client_idx = (client_idx + 1) % len(available_clients)
+                                    current_client = available_clients[client_idx]
+                                    print(f"[metadata scan] ⚠️  Too many unavailable errors ({consecutive_unavailable_errors}), rotating client: {old_client} → {current_client}")
+                                    consecutive_unavailable_errors = 0
+
+                                    # Add extra delay after client rotation
+                                    rotation_delay = base_delay * 2
+                                    print(f"[metadata scan] Adding {rotation_delay:.1f}s delay after client rotation...")
+                                    time.sleep(rotation_delay)
+                                else:
+                                    print(f"[metadata scan] ⚠️  {consecutive_unavailable_errors} unavailable errors detected, but only one client available")
+                        else:
+                            # Reset counter on successful request without unavailable errors
+                            consecutive_unavailable_errors = 0
 
                         # Success! Reset failure tracking
                         consecutive_failures = 0
@@ -630,10 +702,12 @@ def collect_all_video_ids(
 
                     retry_count += 1
 
-                    # Check if this is a retryable error
+                    # Check if this is a retryable error (expanded to include unavailable errors)
                     is_retryable = any(
                         fragment in error_msg.lower()
-                        for fragment in ["403", "forbidden", "po token", "login required"]
+                        for fragment in ["403", "forbidden", "po token", "login required",
+                                        "video unavailable", "content isn't available",
+                                        "content is not available", "this content isn't available"]
                     )
 
                     if is_retryable and retry_count < max_retries:
