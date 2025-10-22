@@ -864,15 +864,40 @@ BGUTIL_PROVIDER_CHOICES: Tuple[str, ...] = tuple(mode.value for mode in BgUtilPr
 
 
 def _default_player_clients() -> Tuple[str, ...]:
+    # Start with yt-dlp's defaults but extend with additional clients for better rotation
     defaults = getattr(YoutubeIE, "_DEFAULT_CLIENTS", None)
-    if defaults:
-        return tuple(defaults)
-    # Fallback to a sensible order if yt-dlp changes internals unexpectedly.
-    preferred_order = ("tv", "web_safari", "web", "android", "ios")
-    ordered_defaults = [client for client in preferred_order if client in PLAYER_CLIENT_CHOICES]
-    if ordered_defaults:
-        return tuple(ordered_defaults)
-    return tuple(PLAYER_CLIENT_CHOICES[:3])
+    base_clients = list(defaults) if defaults else []
+
+    # Extended list of clients for better rate limit avoidance and resilience
+    # Prioritize mobile and TV clients as they tend to have better success rates
+    preferred_order = ("tv", "web_safari", "web", "android", "ios", "mweb", "android_vr", "tv_embedded")
+
+    # Build final list: start with defaults, then add any from preferred_order not already included
+    final_clients = []
+    seen = set()
+
+    # Add base clients first
+    for client in base_clients:
+        if client in PLAYER_CLIENT_CHOICES and client not in seen:
+            final_clients.append(client)
+            seen.add(client)
+
+    # Add additional clients from preferred order
+    for client in preferred_order:
+        if client in PLAYER_CLIENT_CHOICES and client not in seen:
+            final_clients.append(client)
+            seen.add(client)
+
+    # If we still don't have enough clients, add any remaining ones
+    if len(final_clients) < 5:
+        for client in PLAYER_CLIENT_CHOICES:
+            if client not in seen and not client.endswith("_embedded") and not client.endswith("_creator"):
+                final_clients.append(client)
+                seen.add(client)
+                if len(final_clients) >= 8:  # Cap at 8 clients for reasonable rotation
+                    break
+
+    return tuple(final_clients) if final_clients else tuple(PLAYER_CLIENT_CHOICES[:3])
 
 
 DEFAULT_PLAYER_CLIENTS: Tuple[str, ...] = _default_player_clients()
