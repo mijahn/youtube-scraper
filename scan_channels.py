@@ -155,14 +155,15 @@ def scan_all_channels(
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # Get player client
+    # Get player client - only set if explicitly requested by user
+    # Otherwise, pass None to allow automatic client rotation
     player_client: Optional[str] = None
     if args.youtube_client:
         player_client = args.youtube_client
-    elif downloader.DEFAULT_PLAYER_CLIENTS:
-        player_client = downloader.DEFAULT_PLAYER_CLIENTS[0]
-
-    print(f"Using player client: {player_client or 'default'}")
+        print(f"Using forced player client: {player_client}")
+    else:
+        # Don't force a specific client - allow rotation through all available clients
+        print(f"Using automatic client rotation ({len(downloader.DEFAULT_PLAYER_CLIENTS)} clients available: {', '.join(downloader.DEFAULT_PLAYER_CLIENTS)})")
 
     # Scan each source
     total_sources = len(sources)
