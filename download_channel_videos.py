@@ -592,12 +592,19 @@ def collect_all_video_ids(
     client_idx = 0
     current_client = available_clients[client_idx] if available_clients else player_client
 
-    # Track consecutive unavailable errors for client rotation
+    # Track which client is currently working well
+    successful_client: Optional[str] = None
+    consecutive_successes_with_client = 0
+
+    # Track consecutive unavailable errors for the CURRENT client
+    # This helps detect when a previously successful client starts failing
     consecutive_unavailable_errors = 0
-    unavailable_error_threshold = 5  # Rotate client after 5 consecutive unavailable errors
+    unavailable_error_threshold = 3  # Rotate client faster after 3 consecutive unavailable errors
 
     # Track initial unavailable error count to detect new errors
     initial_unavailable_count = logger.video_unavailable_errors
+
+    print(f"[metadata scan] Starting with {len(available_clients)} available client(s): {', '.join(available_clients)}")
 
     urls_list = list(urls)
     total_urls = len(urls_list)
@@ -617,9 +624,18 @@ def collect_all_video_ids(
                 time.sleep(delay_with_jitter)
 
             # Try to extract info with retry logic
-            max_retries = min(3, len(available_clients))  # Retry up to 3 times or number of clients
+            # Try ALL available clients until one succeeds (more aggressive rotation)
+            max_retries = len(available_clients)
             retry_count = 0
             success = False
+
+            # If we have a known successful client, start with it
+            if successful_client and successful_client in available_clients:
+                # Start with the successful client
+                successful_idx = available_clients.index(successful_client)
+                if successful_idx != client_idx:
+                    client_idx = successful_idx
+                    current_client = available_clients[client_idx]
 
             while retry_count < max_retries and not success:
                 try:
@@ -695,7 +711,18 @@ def collect_all_video_ids(
                             # Reset counter on successful request without unavailable errors
                             consecutive_unavailable_errors = 0
 
-                        # Success! Reset failure tracking
+                        # Success! Track which client worked
+                        if successful_client != current_client:
+                            if successful_client is None:
+                                print(f"[metadata scan] ✓ Client '{current_client}' succeeded - will continue using it")
+                            else:
+                                print(f"[metadata scan] ✓ Client switched: {successful_client} → {current_client}")
+                            successful_client = current_client
+                            consecutive_successes_with_client = 1
+                        else:
+                            consecutive_successes_with_client += 1
+
+                        # Reset failure tracking
                         consecutive_failures = 0
                         current_delay = base_delay
                         success = True
@@ -715,18 +742,30 @@ def collect_all_video_ids(
                     )
 
                     if is_retryable and retry_count < max_retries:
-                        # Rotate to next client
+                        # Rotate to next client immediately
+                        old_client = current_client
                         client_idx = (client_idx + 1) % len(available_clients)
                         current_client = available_clients[client_idx]
-                        print(f"[metadata scan] Retryable error detected, switching to client '{current_client}'")
 
-                        # Add a short backoff before retry
-                        retry_delay = min(5 * retry_count, 15)
-                        print(f"[metadata scan] Waiting {retry_delay}s before retry...")
+                        # Mark that the previously successful client is now failing
+                        if old_client == successful_client:
+                            print(f"[metadata scan] ⚠️ Previously successful client '{old_client}' is now failing")
+                            consecutive_successes_with_client = 0
+                            # Don't reset successful_client yet - we'll update it when we find a new working one
+
+                        print(f"[metadata scan] Retryable error detected, rotating client: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
+
+                        # Add a backoff before retry (with jitter to avoid patterns and bans)
+                        # Scale delay based on retry count but keep it reasonable for YouTube
+                        retry_delay = min(5 + (retry_count * 3), 20) * random.uniform(0.9, 1.1)
+                        print(f"[metadata scan] Waiting {retry_delay:.1f}s before retry to avoid triggering rate limits...")
                         time.sleep(retry_delay)
                     else:
                         # Not retryable or out of retries
-                        print(f"[metadata scan] Failed to extract info from {url} after {retry_count} attempts")
+                        if retry_count >= max_retries:
+                            print(f"[metadata scan] Failed to extract info from {url} after trying all {max_retries} available client(s)")
+                        else:
+                            print(f"[metadata scan] Non-retryable error for {url}: {error_msg[:100]}")
                         break
 
                 except Exception as exc:  # pragma: no cover - defensive
@@ -734,11 +773,16 @@ def collect_all_video_ids(
                     retry_count += 1
 
                     if retry_count < max_retries:
-                        print(f"[metadata scan] Unexpected error, retrying with different client...")
+                        old_client = current_client
                         client_idx = (client_idx + 1) % len(available_clients)
                         current_client = available_clients[client_idx]
-                        time.sleep(5)
+                        print(f"[metadata scan] Unexpected error with client '{old_client}', rotating to '{current_client}' (attempt {retry_count}/{max_retries})")
+
+                        # Add delay with jitter
+                        delay = 5 * random.uniform(0.8, 1.2)
+                        time.sleep(delay)
                     else:
+                        print(f"[metadata scan] Unexpected error after trying all {max_retries} client(s): {str(exc)[:100]}")
                         break
 
             # Update exponential backoff based on success/failure
