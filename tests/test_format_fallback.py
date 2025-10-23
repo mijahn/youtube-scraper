@@ -32,6 +32,8 @@ def make_args(**overrides):
         "no_shorts": False,
         "max": None,
         "format": None,
+        "proxy": None,
+        "proxy_file": None,
     }
     defaults.update(overrides)
     args = SimpleNamespace(**defaults)

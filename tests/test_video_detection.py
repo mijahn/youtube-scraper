@@ -30,6 +30,8 @@ def make_args(**overrides):
         "youtube_player_params": None,
         "no_shorts": False,
         "max": None,
+        "proxy": None,
+        "proxy_file": None,
     }
     defaults.update(overrides)
     args = SimpleNamespace(**defaults)

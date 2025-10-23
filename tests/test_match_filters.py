@@ -31,6 +31,8 @@ def make_args(**overrides):
         "youtube_fetch_po_token": None,
         "youtube_po_token": [],
         "youtube_player_params": None,
+        "proxy": None,
+        "proxy_file": None,
     }
     defaults.update(overrides)
     args = SimpleNamespace(**defaults)
