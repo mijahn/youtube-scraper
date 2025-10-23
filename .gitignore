@@ -30,3 +30,9 @@ Thumbs.db
 .channels_state*.json
 downloads/
 config.json
+
+# Backup files
+*.backup
+*.old
+*_old.py
+*_backup.py

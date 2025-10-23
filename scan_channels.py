@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
-import download_channel_videos as downloader
+import youtube_dl as downloader
 
 
 @dataclass
