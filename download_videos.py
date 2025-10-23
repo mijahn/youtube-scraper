@@ -19,7 +19,7 @@ import os
 import sys
 from typing import Dict, List, Optional, Set
 
-import download_channel_videos as downloader
+import youtube_dl as downloader
 
 
 def load_metadata(metadata_path: str) -> Dict:

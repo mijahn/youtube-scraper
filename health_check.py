@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import download_channel_videos as downloader
+import youtube_dl as downloader
 
 try:
     import yt_dlp

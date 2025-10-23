@@ -39,7 +39,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
-import download_channel_videos as downloader
+import youtube_dl as downloader
 
 
 class VideoStatus(Enum):

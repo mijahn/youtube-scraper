@@ -12,7 +12,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
-import download_channel_videos as downloader
+import youtube_dl as downloader
 
 
 @dataclass
