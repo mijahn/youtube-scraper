@@ -1,5 +1,6 @@
 """Source URL parsing and loading functionality."""
 
+import random
 import re
 import sys
 import time
@@ -135,7 +136,16 @@ def load_sources_from_url(url: str) -> Tuple[List[Source], List[str]]:
         if parsed:
             sources.append(parsed)
             raw_lines.append(stripped)
-    print(f"Loaded {len(sources)} sources from remote list")
+
+    # Randomize the order of sources
+    if sources:
+        combined = list(zip(sources, raw_lines))
+        random.shuffle(combined)
+        sources, raw_lines = zip(*combined)
+        sources = list(sources)
+        raw_lines = list(raw_lines)
+
+    print(f"Loaded {len(sources)} sources from remote list (randomized)")
     return sources, raw_lines
 
 
@@ -155,5 +165,14 @@ def load_sources_from_file(path: str) -> Tuple[List[Source], List[str]]:
             if parsed:
                 sources.append(parsed)
                 raw_lines.append(stripped)
-    print(f"Loaded {len(sources)} sources from {path}")
+
+    # Randomize the order of sources
+    if sources:
+        combined = list(zip(sources, raw_lines))
+        random.shuffle(combined)
+        sources, raw_lines = zip(*combined)
+        sources = list(sources)
+        raw_lines = list(raw_lines)
+
+    print(f"Loaded {len(sources)} sources from {path} (randomized)")
     return sources, raw_lines
