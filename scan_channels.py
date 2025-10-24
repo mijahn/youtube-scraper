@@ -55,6 +55,42 @@ class MetadataCache:
     total_channels: int
 
 
+def load_existing_metadata(output_path: str) -> Optional[MetadataCache]:
+    """Load existing metadata cache from JSON file if it exists."""
+    if not os.path.exists(output_path):
+        return None
+
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # Convert dict data back to ChannelMetadata objects
+        channels = []
+        for ch_data in data.get("channels", []):
+            channels.append(
+                ChannelMetadata(
+                    url=ch_data["url"],
+                    kind=ch_data["kind"],
+                    label=ch_data["label"],
+                    scan_timestamp=ch_data["scan_timestamp"],
+                    videos=ch_data["videos"],
+                    total_videos=ch_data["total_videos"],
+                    error=ch_data.get("error"),
+                )
+            )
+
+        return MetadataCache(
+            scan_date=data["scan_date"],
+            channels=channels,
+            total_videos=data["total_videos"],
+            total_channels=data["total_channels"],
+        )
+    except (json.JSONDecodeError, KeyError, OSError) as exc:
+        _log_with_timestamp(f"[resume] ⚠ Warning: Could not load existing metadata from {output_path}: {exc}")
+        _log_with_timestamp(f"[resume] Will start fresh scan")
+        return None
+
+
 def scan_single_source(
     source: downloader.Source,
     args: argparse.Namespace,
@@ -165,6 +201,32 @@ def scan_all_channels(
 
     print(f"Error logging enabled: {error_log_path}")
 
+    # Load existing metadata for resume capability (unless --force is used)
+    existing_metadata: Optional[MetadataCache] = None
+    existing_urls: Set[str] = set()
+
+    if not args.force:
+        _log_with_timestamp(f"[resume] Checking for existing metadata in {args.output}...")
+        existing_metadata = load_existing_metadata(args.output)
+
+        if existing_metadata:
+            _log_with_timestamp(f"[resume] ✓ Loaded existing metadata:")
+            _log_with_timestamp(f"[resume]   • Previously scanned: {existing_metadata.total_channels} channel(s)")
+            _log_with_timestamp(f"[resume]   • Total videos in cache: {existing_metadata.total_videos}")
+            _log_with_timestamp(f"[resume]   • Last scan date: {existing_metadata.scan_date}")
+
+            # Build set of already-scanned URLs (normalized)
+            for ch in existing_metadata.channels:
+                # Normalize URL for comparison
+                normalized = downloader.normalize_url(ch.url)
+                existing_urls.add(normalized)
+
+            _log_with_timestamp(f"[resume] Resume mode: Will skip already-scanned sources")
+        else:
+            _log_with_timestamp(f"[resume] No existing metadata found - starting fresh scan")
+    else:
+        _log_with_timestamp(f"[resume] Force mode enabled - rescanning all sources")
+
     # Load sources
     sources: List[downloader.Source]
     try:
@@ -197,13 +259,27 @@ def scan_all_channels(
 
     # Scan each source
     total_sources = len(sources)
-    channel_metadata: List[ChannelMetadata] = []
-    total_videos = 0
+    new_channel_metadata: List[ChannelMetadata] = []
+    new_videos = 0
+    skipped_count = 0
 
     for idx, source in enumerate(sources, start=1):
         _log_with_timestamp(f"\n{'='*50}")
         _log_with_timestamp(f"[scan {idx}/{total_sources}] Scanning {source.url}")
         _log_with_timestamp(f"{'='*50}")
+
+        # Check if this source was already scanned
+        try:
+            normalized_url = downloader.normalize_url(source.url)
+        except ValueError:
+            # Invalid URL, will be handled by scan_single_source
+            normalized_url = source.url
+
+        if normalized_url in existing_urls:
+            _log_with_timestamp(f"[resume] ⏭ Skipping - already scanned")
+            _log_with_timestamp(f"[resume] (Use --force to rescan all sources)")
+            skipped_count += 1
+            continue
 
         scan_start = time.time()
         metadata = scan_single_source(
@@ -212,29 +288,55 @@ def scan_all_channels(
         scan_duration = time.time() - scan_start
         _log_with_timestamp(f"[scan {idx}/{total_sources}] Completed in {scan_duration:.1f} seconds")
 
-        channel_metadata.append(metadata)
+        new_channel_metadata.append(metadata)
 
         if not metadata.error:
-            total_videos += metadata.total_videos
-            _log_with_timestamp(f"[scan] Total videos collected so far: {total_videos}")
+            new_videos += metadata.total_videos
+            _log_with_timestamp(f"[scan] New videos from this scan: {new_videos}")
 
         # Sleep between sources to avoid rate limiting (except after the last one)
-        if idx < total_sources:
+        remaining = total_sources - idx - skipped_count
+        if remaining > 0:
             _log_with_timestamp(f"[scan] Waiting {request_interval}s before next source...")
             next_start_time = datetime.now().timestamp() + request_interval
             _log_with_timestamp(f"[scan] Next scan will start at approximately {datetime.fromtimestamp(next_start_time).strftime('%H:%M:%S')}")
             time.sleep(request_interval)
             _log_with_timestamp(f"[scan] Wait complete, moving to next source...")
 
-    return (
-        MetadataCache(
-            scan_date=datetime.now().isoformat(),
-            channels=channel_metadata,
-            total_videos=total_videos,
-            total_channels=len(channel_metadata),
-        ),
-        error_analyzer,
-    )
+    # Merge with existing metadata if resuming
+    if existing_metadata:
+        _log_with_timestamp(f"\n[resume] Merging results:")
+        _log_with_timestamp(f"[resume]   • Existing channels: {len(existing_metadata.channels)}")
+        _log_with_timestamp(f"[resume]   • Newly scanned: {len(new_channel_metadata)}")
+        _log_with_timestamp(f"[resume]   • Skipped (already scanned): {skipped_count}")
+
+        # Combine old and new channels
+        all_channels = existing_metadata.channels + new_channel_metadata
+        combined_total_videos = existing_metadata.total_videos + new_videos
+
+        _log_with_timestamp(f"[resume]   • Total channels in output: {len(all_channels)}")
+        _log_with_timestamp(f"[resume]   • Total videos in output: {combined_total_videos}")
+
+        return (
+            MetadataCache(
+                scan_date=datetime.now().isoformat(),
+                channels=all_channels,
+                total_videos=combined_total_videos,
+                total_channels=len(all_channels),
+            ),
+            error_analyzer,
+        )
+    else:
+        # Fresh scan - no existing data
+        return (
+            MetadataCache(
+                scan_date=datetime.now().isoformat(),
+                channels=new_channel_metadata,
+                total_videos=new_videos,
+                total_channels=len(new_channel_metadata),
+            ),
+            error_analyzer,
+        )
 
 
 def save_metadata(cache: MetadataCache, output_path: str) -> None:
@@ -303,6 +405,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         type=float,
         default=60.0,
         help="Seconds to wait between metadata requests (default: 60.0 - one per minute)",
+    )
+
+    # Resume control
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rescan of all sources, ignoring existing metadata (disables resume)",
     )
 
     # YouTube options
@@ -428,7 +537,39 @@ def main(argv=None) -> int:
     print("=" * 70)
     print(f"Request interval: {args.request_interval}s (slow scanning to avoid rate limits)")
     print(f"Output file: {args.output}")
-    print(f"Features: Retry logic, client rotation, exponential backoff, error analysis")
+    print(f"Features: Resume capability, retry logic, client rotation, exponential backoff")
+    print("=" * 70)
+
+    # Show existing metadata summary if available
+    if os.path.exists(args.output):
+        _log_with_timestamp(f"\n[metadata] Existing metadata file found: {args.output}")
+        try:
+            with open(args.output, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            channels_count = len(data.get("channels", []))
+            videos_count = data.get("total_videos", 0)
+            scan_date = data.get("scan_date", "unknown")
+
+            # Count successful vs failed channels
+            successful = sum(1 for ch in data.get("channels", []) if not ch.get("error"))
+            failed = channels_count - successful
+
+            _log_with_timestamp(f"[metadata] Summary of existing data:")
+            _log_with_timestamp(f"[metadata]   • Total channels: {channels_count} ({successful} successful, {failed} failed)")
+            _log_with_timestamp(f"[metadata]   • Total videos: {videos_count}")
+            _log_with_timestamp(f"[metadata]   • Last scan: {scan_date}")
+
+            if args.force:
+                _log_with_timestamp(f"[metadata] --force flag set: Will rescan ALL channels")
+            else:
+                _log_with_timestamp(f"[metadata] Resume mode: Will skip already-scanned channels")
+                _log_with_timestamp(f"[metadata] (Use --force to rescan everything)")
+        except (json.JSONDecodeError, OSError) as exc:
+            _log_with_timestamp(f"[metadata] ⚠ Could not read existing metadata: {exc}")
+    else:
+        _log_with_timestamp(f"\n[metadata] No existing metadata found - starting fresh scan")
+
     print("=" * 70)
 
     # Scan all channels
