@@ -25,32 +25,36 @@ def _collect_video_ids_from_info(
     info: object,
     dest: List[VideoMetadata],
     seen: Optional[Set[str]] = None,
-) -> None:
-    """Recursively extract video identifiers from yt-dlp metadata objects."""
+    log_progress: bool = False,
+) -> int:
+    """
+    Recursively extract video identifiers from yt-dlp metadata objects.
+    Returns the number of new videos found in this call.
+    """
 
     if seen is None:
         seen = set()
 
     if info is None:
-        return
+        return 0
 
     if isinstance(info, list):
+        count = 0
         for entry in info:
-            _collect_video_ids_from_info(entry, dest, seen)
-        return
+            count += _collect_video_ids_from_info(entry, dest, seen, log_progress)
+        return count
 
     if not isinstance(info, dict):
-        return
+        return 0
 
     info_type = info.get("_type")
 
     if info_type in {"playlist", "multi_video", "compat_list"}:
         entries = info.get("entries") or []
-        _collect_video_ids_from_info(entries, dest, seen)
-        return
+        return _collect_video_ids_from_info(entries, dest, seen, log_progress)
 
     if info_type == "url" and "entries" in info:
-        _collect_video_ids_from_info(info.get("entries"), dest, seen)
+        return _collect_video_ids_from_info(info.get("entries"), dest, seen, log_progress)
 
     video_id = info.get("id")
     if video_id:
@@ -60,6 +64,17 @@ def _collect_video_ids_from_info(
             title = info.get("title")
             title_str = title if isinstance(title, str) else None
             dest.append(VideoMetadata(video_id=video_id_str, title=title_str))
+
+            # Log every 50 videos if progress logging is enabled
+            if log_progress and len(dest) % 50 == 0:
+                _log_with_timestamp(f"[video-collect] Collected {len(dest)} videos so far...")
+
+            return 1
+        else:
+            # Video already seen (duplicate)
+            return 0
+
+    return 0
 
 
 def collect_all_video_ids(
@@ -112,10 +127,19 @@ def collect_all_video_ids(
 
     urls_list = list(urls)
     total_urls = len(urls_list)
-    _log_with_timestamp(f"[metadata scan] Total URLs to process: {total_urls}")
+    _log_with_timestamp(f"[url-scan] Will process {total_urls} URL(s) from this source")
 
     try:
         for idx, url in enumerate(urls_list):
+            _log_with_timestamp(f"[url-scan] " + "─" * 60)
+            _log_with_timestamp(f"[url-scan] ▶ Processing URL {idx+1}/{total_urls}")
+
+            # Extract meaningful part of URL for display
+            url_parts = url.split('/')
+            url_suffix = url_parts[-1] if url_parts[-1] else (url_parts[-2] if len(url_parts) > 1 else 'main')
+            _log_with_timestamp(f"[url-scan] URL type: {url_suffix}")
+            _log_with_timestamp(f"[url-scan] Full URL: {url}")
+
             # Add delay between metadata requests to avoid rate limiting
             if idx > 0:
                 # Add random jitter (±20%) to avoid predictable patterns
@@ -123,13 +147,12 @@ def collect_all_video_ids(
                 delay_with_jitter = current_delay * jitter
 
                 if consecutive_failures > 0:
-                    _log_with_timestamp(f"[metadata scan] Exponential backoff: waiting {delay_with_jitter:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
+                    _log_with_timestamp(f"[url-scan] ⏸ Exponential backoff: waiting {delay_with_jitter:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
                 else:
-                    _log_with_timestamp(f"[metadata scan] Waiting {delay_with_jitter:.1f}s before next request to avoid rate limiting...")
+                    _log_with_timestamp(f"[url-scan] ⏸ Waiting {delay_with_jitter:.1f}s before next request (rate limiting)...")
 
-                _log_with_timestamp(f"[metadata scan] Delay started at {datetime.now().strftime('%H:%M:%S')}")
                 time.sleep(delay_with_jitter)
-                _log_with_timestamp(f"[metadata scan] Delay completed at {datetime.now().strftime('%H:%M:%S')}")
+                _log_with_timestamp(f"[url-scan] ▶ Resuming...")
 
             # Try to extract info with retry logic
             # Try ALL available clients until one succeeds (more aggressive rotation)
@@ -152,7 +175,7 @@ def collect_all_video_ids(
                     user_agent_short = selected_user_agent.split('(')[0].strip() if '(' in selected_user_agent else selected_user_agent[:50]
 
                     # Build options for current client
-                    _log_with_timestamp(f"[metadata scan] Building yt-dlp options for URL {idx+1}/{total_urls}")
+                    _log_with_timestamp(f"[extract] Building yt-dlp options...")
                     ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
                     ydl_opts["skip_download"] = True
                     # Enable VERBOSE mode for maximum visibility
@@ -171,33 +194,42 @@ def collect_all_video_ids(
                         ydl_opts["http_headers"] = {}
                     ydl_opts["http_headers"]["User-Agent"] = selected_user_agent
 
-                    _log_with_timestamp(f"[metadata scan] Using User-Agent: {user_agent_short}")
-                    _log_with_timestamp(f"[metadata scan] Using player client: {current_client}")
+                    _log_with_timestamp(f"[extract] Using User-Agent: {user_agent_short}")
+                    _log_with_timestamp(f"[extract] Using player client: {current_client}")
 
                     logger.set_context(url, current_client)
 
                     # Track unavailable errors before the request
                     pre_request_unavailable_count = logger.video_unavailable_errors
+                    videos_before = len(video_metadata)
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         if retry_count > 0:
-                            _log_with_timestamp(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
+                            _log_with_timestamp(f"[extract] ⟳ Retry {retry_count}/{max_retries-1} with client '{current_client}'")
 
                         # Show that we're starting the extraction (this can take time)
-                        _log_with_timestamp(f"[metadata scan] ==> Starting extract_info for URL {idx+1}/{total_urls}: {url}")
-                        _log_with_timestamp(f"[metadata scan] ==> This may take several minutes depending on channel size and rate limits...")
-                        _log_with_timestamp(f"[metadata scan] ==> Watch for yt-dlp output below...")
+                        _log_with_timestamp(f"[extract] ═══════════════════════════════════════════════")
+                        _log_with_timestamp(f"[extract] ▶ Starting metadata extraction from YouTube")
+                        _log_with_timestamp(f"[extract] This operation may take several minutes...")
+                        _log_with_timestamp(f"[extract] yt-dlp is fetching channel/playlist data...")
+                        _log_with_timestamp(f"[extract] ═══════════════════════════════════════════════")
                         sys.stdout.flush()
 
                         extraction_start = time.time()
                         info = ydl.extract_info(url, download=False)
                         extraction_duration = time.time() - extraction_start
 
-                        _log_with_timestamp(f"[metadata scan] <== extract_info completed in {extraction_duration:.1f} seconds")
-                        _log_with_timestamp(f"[metadata scan] Processing extracted video metadata...")
+                        _log_with_timestamp(f"[extract] ✓ Metadata extraction completed in {extraction_duration:.1f}s")
+                        _log_with_timestamp(f"[extract] Parsing video metadata structure...")
 
-                        _collect_video_ids_from_info(info, video_metadata, seen_ids)
-                        _log_with_timestamp(f"[metadata scan] Collected {len(video_metadata)} total videos so far")
+                        new_videos = _collect_video_ids_from_info(info, video_metadata, seen_ids, log_progress=True)
+                        videos_after = len(video_metadata)
+                        duplicates_found = new_videos - (videos_after - videos_before) if new_videos > 0 else 0
+
+                        _log_with_timestamp(f"[extract] ✓ Found {new_videos} video(s) from this URL")
+                        if duplicates_found > 0:
+                            _log_with_timestamp(f"[extract] ℹ {duplicates_found} duplicate(s) skipped")
+                        _log_with_timestamp(f"[extract] Running total: {videos_after} unique video(s)")
 
                         # Check if unavailable errors occurred during this request
                         post_request_unavailable_count = logger.video_unavailable_errors
@@ -205,13 +237,13 @@ def collect_all_video_ids(
 
                         if new_unavailable_errors > 0:
                             consecutive_unavailable_errors += new_unavailable_errors
-                            _log_with_timestamp(f"[metadata scan] Detected {new_unavailable_errors} unavailable video(s) (consecutive: {consecutive_unavailable_errors})")
+                            _log_with_timestamp(f"[extract] ⚠ Detected {new_unavailable_errors} unavailable video(s) (consecutive: {consecutive_unavailable_errors})")
 
                             # Check if we're being rate limited (many errors in short time)
                             if logger.check_unavailable_rate_limiting():
                                 rate_limit_pause = 60  # Pause for 1 minute
-                                _log_with_timestamp(f"[metadata scan] ⚠️  Detected rapid unavailable errors - possible rate limiting!")
-                                _log_with_timestamp(f"[metadata scan] Pausing for {rate_limit_pause}s to avoid further rate limiting...")
+                                _log_with_timestamp(f"[extract] ⚠ Detected rapid unavailable errors - possible rate limiting!")
+                                _log_with_timestamp(f"[extract] ⏸ Pausing for {rate_limit_pause}s to avoid further rate limiting...")
                                 time.sleep(rate_limit_pause)
                                 # Clear old timestamps after pause
                                 logger.unavailable_timestamps = []
@@ -222,15 +254,15 @@ def collect_all_video_ids(
                                     old_client = current_client
                                     client_idx = (client_idx + 1) % len(available_clients)
                                     current_client = available_clients[client_idx]
-                                    _log_with_timestamp(f"[metadata scan] ⚠️  Too many unavailable errors ({consecutive_unavailable_errors}), rotating client: {old_client} → {current_client}")
+                                    _log_with_timestamp(f"[extract] ⚠ Too many unavailable errors ({consecutive_unavailable_errors}), rotating client: {old_client} → {current_client}")
                                     consecutive_unavailable_errors = 0
 
                                     # Add extra delay after client rotation
                                     rotation_delay = base_delay * 2
-                                    _log_with_timestamp(f"[metadata scan] Adding {rotation_delay:.1f}s delay after client rotation...")
+                                    _log_with_timestamp(f"[extract] ⏸ Adding {rotation_delay:.1f}s delay after client rotation...")
                                     time.sleep(rotation_delay)
                                 else:
-                                    _log_with_timestamp(f"[metadata scan] ⚠️  {consecutive_unavailable_errors} unavailable errors detected, but only one client available")
+                                    _log_with_timestamp(f"[extract] ⚠ {consecutive_unavailable_errors} unavailable errors detected, but only one client available")
                         else:
                             # Reset counter on successful request without unavailable errors
                             consecutive_unavailable_errors = 0
@@ -238,9 +270,9 @@ def collect_all_video_ids(
                         # Success! Track which client worked
                         if successful_client != current_client:
                             if successful_client is None:
-                                _log_with_timestamp(f"[metadata scan] ✓ Client '{current_client}' succeeded - will continue using it")
+                                _log_with_timestamp(f"[client] ✓ Client '{current_client}' succeeded - will continue using it")
                             else:
-                                _log_with_timestamp(f"[metadata scan] ✓ Client switched: {successful_client} → {current_client}")
+                                _log_with_timestamp(f"[client] ✓ Switched: {successful_client} → {current_client}")
                             successful_client = current_client
                             consecutive_successes_with_client = 1
                         else:
@@ -250,12 +282,12 @@ def collect_all_video_ids(
                         consecutive_failures = 0
                         current_delay = base_delay
                         success = True
-                        _log_with_timestamp(f"[metadata scan] ✓ Successfully processed URL {idx+1}/{total_urls}")
+                        _log_with_timestamp(f"[url-scan] ✓ Successfully completed URL {idx+1}/{total_urls}")
 
                 except (DownloadError, ExtractorError) as exc:
                     error_msg = str(exc)
                     logger.record_exception(exc)
-                    _log_with_timestamp(f"[metadata scan] ❌ DownloadError/ExtractorError: {error_msg[:200]}")
+                    _log_with_timestamp(f"[extract] ❌ Error: {error_msg[:150]}")
 
                     retry_count += 1
 
@@ -275,41 +307,41 @@ def collect_all_video_ids(
 
                         # Mark that the previously successful client is now failing
                         if old_client == successful_client:
-                            _log_with_timestamp(f"[metadata scan] ⚠️ Previously successful client '{old_client}' is now failing")
+                            _log_with_timestamp(f"[client] ⚠ Previously successful client '{old_client}' is now failing")
                             consecutive_successes_with_client = 0
                             # Don't reset successful_client yet - we'll update it when we find a new working one
 
-                        _log_with_timestamp(f"[metadata scan] Retryable error detected, rotating client: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
+                        _log_with_timestamp(f"[client] ⟳ Rotating: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
 
                         # Add a backoff before retry (with jitter to avoid patterns and bans)
                         # Scale delay based on retry count but keep it reasonable for YouTube
                         retry_delay = min(5 + (retry_count * 3), 20) * random.uniform(0.9, 1.1)
-                        _log_with_timestamp(f"[metadata scan] Waiting {retry_delay:.1f}s before retry to avoid triggering rate limits...")
+                        _log_with_timestamp(f"[extract] ⏸ Waiting {retry_delay:.1f}s before retry...")
                         time.sleep(retry_delay)
                     else:
                         # Not retryable or out of retries
                         if retry_count >= max_retries:
-                            _log_with_timestamp(f"[metadata scan] ❌ Failed to extract info from {url} after trying all {max_retries} available client(s)")
+                            _log_with_timestamp(f"[extract] ❌ Failed after trying all {max_retries} available client(s)")
                         else:
-                            _log_with_timestamp(f"[metadata scan] ❌ Non-retryable error for {url}: {error_msg[:100]}")
+                            _log_with_timestamp(f"[extract] ❌ Non-retryable error: {error_msg[:100]}")
                         break
 
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.record_exception(exc)
                     retry_count += 1
-                    _log_with_timestamp(f"[metadata scan] ❌ Unexpected exception: {str(exc)[:200]}")
+                    _log_with_timestamp(f"[extract] ❌ Unexpected exception: {str(exc)[:150]}")
 
                     if retry_count < max_retries:
                         old_client = current_client
                         client_idx = (client_idx + 1) % len(available_clients)
                         current_client = available_clients[client_idx]
-                        _log_with_timestamp(f"[metadata scan] Unexpected error with client '{old_client}', rotating to '{current_client}' (attempt {retry_count}/{max_retries})")
+                        _log_with_timestamp(f"[client] ⟳ Rotating due to error: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
 
                         # Add delay with jitter
                         delay = 5 * random.uniform(0.8, 1.2)
                         time.sleep(delay)
                     else:
-                        _log_with_timestamp(f"[metadata scan] ❌ Unexpected error after trying all {max_retries} client(s): {str(exc)[:100]}")
+                        _log_with_timestamp(f"[extract] ❌ Failed after trying all {max_retries} client(s)")
                         break
 
             # Update exponential backoff based on success/failure
@@ -317,11 +349,11 @@ def collect_all_video_ids(
                 consecutive_failures += 1
                 # Exponential backoff: double the delay for each consecutive failure
                 current_delay = min(base_delay * (2 ** consecutive_failures), max_backoff_delay)
-                _log_with_timestamp(f"[metadata scan] Failed to process URL {idx+1}/{total_urls}, increasing delay to {current_delay:.1f}s")
+                _log_with_timestamp(f"[url-scan] ❌ Failed URL {idx+1}/{total_urls}, next delay increased to {current_delay:.1f}s")
             else:
                 # Success - reset exponential backoff but maintain base delay
                 if consecutive_failures > 0:
-                    _log_with_timestamp(f"[metadata scan] Success after {consecutive_failures} consecutive failures, resetting delay")
+                    _log_with_timestamp(f"[url-scan] ✓ Success after {consecutive_failures} consecutive failure(s), resetting delay")
                 consecutive_failures = 0
                 current_delay = base_delay
 

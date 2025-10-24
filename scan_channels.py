@@ -64,11 +64,22 @@ def scan_single_source(
 ) -> ChannelMetadata:
     """Scan a single source and return its metadata."""
 
+    _log_with_timestamp(f"[source] ▶ Starting scan of source: {source.url}")
+    _log_with_timestamp(f"[source] Source type: {source.kind.value}")
+
     try:
+        _log_with_timestamp(f"[source] Building URLs to scan...")
         urls = source.build_download_urls(include_shorts=not args.no_shorts)
         display_url = downloader.normalize_url(source.url)
+
+        url_list = list(urls)
+        _log_with_timestamp(f"[source] Built {len(url_list)} URL(s) to scan:")
+        for i, url in enumerate(url_list, 1):
+            # Extract the meaningful part (e.g., /videos, /shorts)
+            url_suffix = url.split('@')[-1].split('/')[-1] if '/' in url else 'main'
+            _log_with_timestamp(f"[source]   {i}. .../{url_suffix}")
     except ValueError as exc:
-        print(f"Error: Invalid URL ({source.url!r}): {exc}", file=sys.stderr)
+        _log_with_timestamp(f"[source] ❌ Error: Invalid URL: {exc}")
         if error_analyzer:
             error_analyzer.categorize_and_record(None, str(exc))
         return ChannelMetadata(
@@ -81,18 +92,16 @@ def scan_single_source(
             error=str(exc),
         )
 
-    _log_with_timestamp(f"[scan] Fetching metadata for {display_url}")
-    _log_with_timestamp(f"[scan] Request interval: {request_interval}s (to avoid rate limiting)")
+    _log_with_timestamp(f"[source] Starting video metadata extraction...")
+    _log_with_timestamp(f"[source] Rate limiting: {request_interval}s between requests")
 
     # Override sleep_requests to use the configured interval
     args.sleep_requests = request_interval
 
     try:
-        _log_with_timestamp(f"[scan] Starting video ID collection for {display_url}")
         video_entries = downloader.collect_all_video_ids(
             urls, args, player_client, error_analyzer=error_analyzer
         )
-        _log_with_timestamp(f"[scan] Video ID collection complete for {display_url}")
 
         # Convert VideoMetadata objects to dicts
         videos = [
@@ -102,7 +111,19 @@ def scan_single_source(
 
         label = downloader.summarize_source_label(source, display_url)
 
-        _log_with_timestamp(f"[scan] Found {len(videos)} videos in {display_url}")
+        _log_with_timestamp(f"[source] ✓ Scan complete!")
+        _log_with_timestamp(f"[source] Summary for {display_url}:")
+        _log_with_timestamp(f"[source]   • Total videos found: {len(videos)}")
+        _log_with_timestamp(f"[source]   • Source label: {label}")
+
+        # Show a sample of video titles if we have any
+        if videos:
+            sample_size = min(3, len(videos))
+            _log_with_timestamp(f"[source]   • Sample videos:")
+            for i, video in enumerate(videos[:sample_size], 1):
+                title = video['title'] or '(no title)'
+                title_short = title[:60] + '...' if len(title) > 60 else title
+                _log_with_timestamp(f"[source]     {i}. {title_short}")
 
         return ChannelMetadata(
             url=display_url,
@@ -114,7 +135,7 @@ def scan_single_source(
         )
 
     except Exception as exc:
-        print(f"Error scanning {display_url}: {exc}", file=sys.stderr)
+        _log_with_timestamp(f"[source] ❌ Error scanning {display_url}: {exc}")
         if error_analyzer:
             error_analyzer.categorize_and_record(None, str(exc))
         return ChannelMetadata(
