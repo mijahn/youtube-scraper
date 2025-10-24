@@ -6,8 +6,24 @@ scan_channels.py
 Standalone metadata scanner for YouTube channels.
 Slowly scans channels for video metadata to avoid rate limiting.
 
+Features:
+    - Incremental saves: Progress saved after each source (prevents data loss)
+    - Resume capability: Skips already-scanned sources (use --force to rescan)
+    - Real-time statistics: Live progress, ETA, and video counts
+    - Auto-backup: Creates .backup files before overwriting
+    - Atomic writes: Uses temp files to prevent corruption
+
 Usage:
+    # Start new scan
     python scan_channels.py --channels-file channels.txt --output metadata.json
+
+    # Resume interrupted scan (skips already-scanned sources)
+    python scan_channels.py --channels-file channels.txt --output metadata.json
+
+    # Force rescan all sources
+    python scan_channels.py --channels-file channels.txt --output metadata.json --force
+
+    # Adjust rate limiting
     python scan_channels.py --channels-file channels.txt --output metadata.json --request-interval 60
 """
 
@@ -16,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -262,6 +279,11 @@ def scan_all_channels(
     new_channel_metadata: List[ChannelMetadata] = []
     new_videos = 0
     skipped_count = 0
+    successful_scans = 0
+    failed_scans = 0
+
+    # Track session start time for statistics
+    session_start_time = time.time()
 
     for idx, source in enumerate(sources, start=1):
         _log_with_timestamp(f"\n{'='*50}")
@@ -290,13 +312,68 @@ def scan_all_channels(
 
         new_channel_metadata.append(metadata)
 
+        # Update statistics
         if not metadata.error:
             new_videos += metadata.total_videos
-            _log_with_timestamp(f"[scan] New videos from this scan: {new_videos}")
+            successful_scans += 1
+        else:
+            failed_scans += 1
+
+        # INCREMENTAL SAVE - Save progress after each source
+        # This prevents data loss if the process is interrupted
+        _log_with_timestamp(f"\n[save] Saving incremental progress...")
+
+        # Combine existing and new data for incremental save
+        if existing_metadata:
+            current_cache = MetadataCache(
+                scan_date=datetime.now().isoformat(),
+                channels=existing_metadata.channels + new_channel_metadata,
+                total_videos=existing_metadata.total_videos + new_videos,
+                total_channels=len(existing_metadata.channels) + len(new_channel_metadata),
+            )
+        else:
+            current_cache = MetadataCache(
+                scan_date=datetime.now().isoformat(),
+                channels=new_channel_metadata,
+                total_videos=new_videos,
+                total_channels=len(new_channel_metadata),
+            )
+
+        # Save with backup
+        try:
+            save_metadata(current_cache, args.output, create_backup=True)
+        except OSError as exc:
+            _log_with_timestamp(f"[save] ⚠ Warning: Incremental save failed: {exc}")
+            _log_with_timestamp(f"[save] Continuing scan... (will retry save after next source)")
+
+        # Display real-time statistics
+        _log_with_timestamp(f"\n[stats] === SESSION STATISTICS ===")
+        _log_with_timestamp(f"[stats] Session progress: {idx - skipped_count}/{total_sources - skipped_count} sources scanned")
+        _log_with_timestamp(f"[stats] Already cached: {skipped_count} sources")
+        _log_with_timestamp(f"[stats] New scans: {len(new_channel_metadata)} sources ({successful_scans} successful, {failed_scans} failed)")
+        _log_with_timestamp(f"[stats] New videos found: {new_videos}")
+
+        # Calculate totals including existing data
+        total_channels_now = (len(existing_metadata.channels) if existing_metadata else 0) + len(new_channel_metadata)
+        total_videos_now = (existing_metadata.total_videos if existing_metadata else 0) + new_videos
+        _log_with_timestamp(f"[stats] Total in cache: {total_channels_now} channels, {total_videos_now} videos")
+
+        # Time statistics
+        session_elapsed = time.time() - session_start_time
+        avg_time_per_source = session_elapsed / (len(new_channel_metadata)) if new_channel_metadata else 0
+        remaining_sources = total_sources - idx - skipped_count
+        estimated_time_remaining = avg_time_per_source * remaining_sources if remaining_sources > 0 else 0
+
+        _log_with_timestamp(f"[stats] Session time: {session_elapsed/60:.1f} minutes")
+        if remaining_sources > 0:
+            _log_with_timestamp(f"[stats] Avg time per source: {avg_time_per_source/60:.1f} minutes")
+            _log_with_timestamp(f"[stats] Estimated time remaining: {estimated_time_remaining/60:.1f} minutes")
+            estimated_completion = datetime.fromtimestamp(time.time() + estimated_time_remaining)
+            _log_with_timestamp(f"[stats] Estimated completion: {estimated_completion.strftime('%Y-%m-%d %H:%M:%S')}")
+        _log_with_timestamp(f"[stats] ========================\n")
 
         # Sleep between sources to avoid rate limiting (except after the last one)
-        remaining = total_sources - idx - skipped_count
-        if remaining > 0:
+        if remaining_sources > 0:
             _log_with_timestamp(f"[scan] Waiting {request_interval}s before next source...")
             next_start_time = datetime.now().timestamp() + request_interval
             _log_with_timestamp(f"[scan] Next scan will start at approximately {datetime.fromtimestamp(next_start_time).strftime('%H:%M:%S')}")
@@ -339,8 +416,14 @@ def scan_all_channels(
         )
 
 
-def save_metadata(cache: MetadataCache, output_path: str) -> None:
-    """Save metadata cache to JSON file."""
+def save_metadata(cache: MetadataCache, output_path: str, create_backup: bool = True) -> None:
+    """Save metadata cache to JSON file with optional backup.
+
+    Args:
+        cache: The metadata cache to save
+        output_path: Path to save the metadata file
+        create_backup: If True, create a backup of existing file before overwriting
+    """
 
     # Convert to dict
     data = {
@@ -366,11 +449,33 @@ def save_metadata(cache: MetadataCache, output_path: str) -> None:
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    # Write to file
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Create backup of existing file before overwriting
+    if create_backup and os.path.exists(output_path):
+        backup_path = f"{output_path}.backup"
+        try:
+            shutil.copy2(output_path, backup_path)
+            _log_with_timestamp(f"[save] Created backup: {backup_path}")
+        except OSError as exc:
+            _log_with_timestamp(f"[save] ⚠ Warning: Could not create backup: {exc}")
 
-    print(f"\n[scan] Metadata saved to {output_path}")
+    # Write to temporary file first, then rename (atomic operation)
+    temp_path = f"{output_path}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        # Atomic rename (prevents corruption if interrupted)
+        os.replace(temp_path, output_path)
+        _log_with_timestamp(f"[save] ✓ Metadata saved to {output_path}")
+    except OSError as exc:
+        _log_with_timestamp(f"[save] ❌ Error saving metadata: {exc}")
+        # Clean up temp file if it exists
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -537,8 +642,35 @@ def main(argv=None) -> int:
     print("=" * 70)
     print(f"Request interval: {args.request_interval}s (slow scanning to avoid rate limits)")
     print(f"Output file: {args.output}")
-    print(f"Features: Resume capability, retry logic, client rotation, exponential backoff")
+    print(f"Features: Incremental saves, resume capability, real-time stats, auto-backup")
     print("=" * 70)
+
+    # Ensure output directory exists and create initial metadata file if needed
+    output_dir = os.path.dirname(args.output) if os.path.dirname(args.output) else "."
+    if output_dir and output_dir != ".":
+        os.makedirs(output_dir, exist_ok=True)
+        _log_with_timestamp(f"\n[init] Output directory: {os.path.abspath(output_dir)}")
+
+    # Show full path to metadata file
+    full_output_path = os.path.abspath(args.output)
+    _log_with_timestamp(f"[init] Metadata will be saved to: {full_output_path}")
+
+    # Create empty metadata file if it doesn't exist (confirms write permissions)
+    if not os.path.exists(args.output):
+        _log_with_timestamp(f"[init] Creating new metadata file...")
+        try:
+            initial_cache = MetadataCache(
+                scan_date=datetime.now().isoformat(),
+                channels=[],
+                total_videos=0,
+                total_channels=0,
+            )
+            save_metadata(initial_cache, args.output, create_backup=False)
+            _log_with_timestamp(f"[init] ✓ Metadata file created successfully")
+        except OSError as exc:
+            _log_with_timestamp(f"[init] ❌ Error: Cannot create metadata file: {exc}")
+            _log_with_timestamp(f"[init] Please check write permissions for: {full_output_path}")
+            return 1
 
     # Show existing metadata summary if available
     if os.path.exists(args.output):
