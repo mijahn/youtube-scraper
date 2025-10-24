@@ -25,6 +25,13 @@ from typing import Dict, List, Optional, Set, Tuple
 import youtube_dl as downloader
 
 
+def _log_with_timestamp(message: str) -> None:
+    """Print a log message with timestamp."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
+    sys.stdout.flush()  # Force immediate output
+
+
 @dataclass
 class ChannelMetadata:
     """Metadata for a single channel/source."""
@@ -74,16 +81,18 @@ def scan_single_source(
             error=str(exc),
         )
 
-    print(f"[scan] Fetching metadata for {display_url}")
-    print(f"[scan] Request interval: {request_interval}s (to avoid rate limiting)")
+    _log_with_timestamp(f"[scan] Fetching metadata for {display_url}")
+    _log_with_timestamp(f"[scan] Request interval: {request_interval}s (to avoid rate limiting)")
 
     # Override sleep_requests to use the configured interval
     args.sleep_requests = request_interval
 
     try:
+        _log_with_timestamp(f"[scan] Starting video ID collection for {display_url}")
         video_entries = downloader.collect_all_video_ids(
             urls, args, player_client, error_analyzer=error_analyzer
         )
+        _log_with_timestamp(f"[scan] Video ID collection complete for {display_url}")
 
         # Convert VideoMetadata objects to dicts
         videos = [
@@ -93,7 +102,7 @@ def scan_single_source(
 
         label = downloader.summarize_source_label(source, display_url)
 
-        print(f"[scan] Found {len(videos)} videos in {display_url}")
+        _log_with_timestamp(f"[scan] Found {len(videos)} videos in {display_url}")
 
         return ChannelMetadata(
             url=display_url,
@@ -171,20 +180,30 @@ def scan_all_channels(
     total_videos = 0
 
     for idx, source in enumerate(sources, start=1):
-        print(f"\n[scan {idx}/{total_sources}] Scanning {source.url}")
+        _log_with_timestamp(f"\n{'='*50}")
+        _log_with_timestamp(f"[scan {idx}/{total_sources}] Scanning {source.url}")
+        _log_with_timestamp(f"{'='*50}")
 
+        scan_start = time.time()
         metadata = scan_single_source(
             source, args, player_client, request_interval, error_analyzer
         )
+        scan_duration = time.time() - scan_start
+        _log_with_timestamp(f"[scan {idx}/{total_sources}] Completed in {scan_duration:.1f} seconds")
+
         channel_metadata.append(metadata)
 
         if not metadata.error:
             total_videos += metadata.total_videos
+            _log_with_timestamp(f"[scan] Total videos collected so far: {total_videos}")
 
         # Sleep between sources to avoid rate limiting (except after the last one)
         if idx < total_sources:
-            print(f"[scan] Waiting {request_interval}s before next source...")
+            _log_with_timestamp(f"[scan] Waiting {request_interval}s before next source...")
+            next_start_time = datetime.now().timestamp() + request_interval
+            _log_with_timestamp(f"[scan] Next scan will start at approximately {datetime.fromtimestamp(next_start_time).strftime('%H:%M:%S')}")
             time.sleep(request_interval)
+            _log_with_timestamp(f"[scan] Wait complete, moving to next source...")
 
     return (
         MetadataCache(

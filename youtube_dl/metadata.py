@@ -1,7 +1,9 @@
 """Video metadata collection from YouTube channels and playlists."""
 
 import random
+import sys
 import time
+from datetime import datetime
 from typing import Iterable, List, Optional, Set
 
 import yt_dlp
@@ -10,6 +12,13 @@ from yt_dlp.utils import DownloadError, ExtractorError
 from .errors import ErrorAnalyzer
 from .logger import DownloadLogger
 from .models import DEFAULT_PLAYER_CLIENTS, USER_AGENTS, VideoMetadata
+
+
+def _log_with_timestamp(message: str) -> None:
+    """Print a log message with timestamp."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
+    sys.stdout.flush()  # Force immediate output
 
 
 def _collect_video_ids_from_info(
@@ -99,10 +108,11 @@ def collect_all_video_ids(
     # Track initial unavailable error count to detect new errors
     initial_unavailable_count = logger.video_unavailable_errors
 
-    print(f"[metadata scan] Starting with {len(available_clients)} available client(s): {', '.join(available_clients)}")
+    _log_with_timestamp(f"[metadata scan] Starting with {len(available_clients)} available client(s): {', '.join(available_clients)}")
 
     urls_list = list(urls)
     total_urls = len(urls_list)
+    _log_with_timestamp(f"[metadata scan] Total URLs to process: {total_urls}")
 
     try:
         for idx, url in enumerate(urls_list):
@@ -113,10 +123,13 @@ def collect_all_video_ids(
                 delay_with_jitter = current_delay * jitter
 
                 if consecutive_failures > 0:
-                    print(f"[metadata scan] Exponential backoff: waiting {delay_with_jitter:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
+                    _log_with_timestamp(f"[metadata scan] Exponential backoff: waiting {delay_with_jitter:.1f}s (base: {base_delay}s, consecutive failures: {consecutive_failures})...")
                 else:
-                    print(f"[metadata scan] Waiting {delay_with_jitter:.1f}s before next request to avoid rate limiting...")
+                    _log_with_timestamp(f"[metadata scan] Waiting {delay_with_jitter:.1f}s before next request to avoid rate limiting...")
+
+                _log_with_timestamp(f"[metadata scan] Delay started at {datetime.now().strftime('%H:%M:%S')}")
                 time.sleep(delay_with_jitter)
+                _log_with_timestamp(f"[metadata scan] Delay completed at {datetime.now().strftime('%H:%M:%S')}")
 
             # Try to extract info with retry logic
             # Try ALL available clients until one succeeds (more aggressive rotation)
@@ -136,11 +149,14 @@ def collect_all_video_ids(
                 try:
                     # Rotate user agent for each request to appear as different browsers
                     selected_user_agent = random.choice(USER_AGENTS)
+                    user_agent_short = selected_user_agent.split('(')[0].strip() if '(' in selected_user_agent else selected_user_agent[:50]
 
                     # Build options for current client
+                    _log_with_timestamp(f"[metadata scan] Building yt-dlp options for URL {idx+1}/{total_urls}")
                     ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
                     ydl_opts["skip_download"] = True
-                    # Don't suppress output during metadata scanning - we want to see progress
+                    # Enable VERBOSE mode for maximum visibility
+                    ydl_opts["verbose"] = True
                     ydl_opts["quiet"] = False
                     ydl_opts["no_warnings"] = False
                     ydl_opts["progress_hooks"] = []
@@ -155,6 +171,9 @@ def collect_all_video_ids(
                         ydl_opts["http_headers"] = {}
                     ydl_opts["http_headers"]["User-Agent"] = selected_user_agent
 
+                    _log_with_timestamp(f"[metadata scan] Using User-Agent: {user_agent_short}")
+                    _log_with_timestamp(f"[metadata scan] Using player client: {current_client}")
+
                     logger.set_context(url, current_client)
 
                     # Track unavailable errors before the request
@@ -162,13 +181,23 @@ def collect_all_video_ids(
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         if retry_count > 0:
-                            print(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
+                            _log_with_timestamp(f"[metadata scan] Retry {retry_count}/{max_retries-1} for {url} with client '{current_client}'")
 
                         # Show that we're starting the extraction (this can take time)
-                        print(f"[metadata scan] Extracting channel info from {url}...")
+                        _log_with_timestamp(f"[metadata scan] ==> Starting extract_info for URL {idx+1}/{total_urls}: {url}")
+                        _log_with_timestamp(f"[metadata scan] ==> This may take several minutes depending on channel size and rate limits...")
+                        _log_with_timestamp(f"[metadata scan] ==> Watch for yt-dlp output below...")
+                        sys.stdout.flush()
 
+                        extraction_start = time.time()
                         info = ydl.extract_info(url, download=False)
+                        extraction_duration = time.time() - extraction_start
+
+                        _log_with_timestamp(f"[metadata scan] <== extract_info completed in {extraction_duration:.1f} seconds")
+                        _log_with_timestamp(f"[metadata scan] Processing extracted video metadata...")
+
                         _collect_video_ids_from_info(info, video_metadata, seen_ids)
+                        _log_with_timestamp(f"[metadata scan] Collected {len(video_metadata)} total videos so far")
 
                         # Check if unavailable errors occurred during this request
                         post_request_unavailable_count = logger.video_unavailable_errors
@@ -176,13 +205,13 @@ def collect_all_video_ids(
 
                         if new_unavailable_errors > 0:
                             consecutive_unavailable_errors += new_unavailable_errors
-                            print(f"[metadata scan] Detected {new_unavailable_errors} unavailable video(s) (consecutive: {consecutive_unavailable_errors})")
+                            _log_with_timestamp(f"[metadata scan] Detected {new_unavailable_errors} unavailable video(s) (consecutive: {consecutive_unavailable_errors})")
 
                             # Check if we're being rate limited (many errors in short time)
                             if logger.check_unavailable_rate_limiting():
                                 rate_limit_pause = 60  # Pause for 1 minute
-                                print(f"[metadata scan] ⚠️  Detected rapid unavailable errors - possible rate limiting!")
-                                print(f"[metadata scan] Pausing for {rate_limit_pause}s to avoid further rate limiting...")
+                                _log_with_timestamp(f"[metadata scan] ⚠️  Detected rapid unavailable errors - possible rate limiting!")
+                                _log_with_timestamp(f"[metadata scan] Pausing for {rate_limit_pause}s to avoid further rate limiting...")
                                 time.sleep(rate_limit_pause)
                                 # Clear old timestamps after pause
                                 logger.unavailable_timestamps = []
@@ -193,15 +222,15 @@ def collect_all_video_ids(
                                     old_client = current_client
                                     client_idx = (client_idx + 1) % len(available_clients)
                                     current_client = available_clients[client_idx]
-                                    print(f"[metadata scan] ⚠️  Too many unavailable errors ({consecutive_unavailable_errors}), rotating client: {old_client} → {current_client}")
+                                    _log_with_timestamp(f"[metadata scan] ⚠️  Too many unavailable errors ({consecutive_unavailable_errors}), rotating client: {old_client} → {current_client}")
                                     consecutive_unavailable_errors = 0
 
                                     # Add extra delay after client rotation
                                     rotation_delay = base_delay * 2
-                                    print(f"[metadata scan] Adding {rotation_delay:.1f}s delay after client rotation...")
+                                    _log_with_timestamp(f"[metadata scan] Adding {rotation_delay:.1f}s delay after client rotation...")
                                     time.sleep(rotation_delay)
                                 else:
-                                    print(f"[metadata scan] ⚠️  {consecutive_unavailable_errors} unavailable errors detected, but only one client available")
+                                    _log_with_timestamp(f"[metadata scan] ⚠️  {consecutive_unavailable_errors} unavailable errors detected, but only one client available")
                         else:
                             # Reset counter on successful request without unavailable errors
                             consecutive_unavailable_errors = 0
@@ -209,9 +238,9 @@ def collect_all_video_ids(
                         # Success! Track which client worked
                         if successful_client != current_client:
                             if successful_client is None:
-                                print(f"[metadata scan] ✓ Client '{current_client}' succeeded - will continue using it")
+                                _log_with_timestamp(f"[metadata scan] ✓ Client '{current_client}' succeeded - will continue using it")
                             else:
-                                print(f"[metadata scan] ✓ Client switched: {successful_client} → {current_client}")
+                                _log_with_timestamp(f"[metadata scan] ✓ Client switched: {successful_client} → {current_client}")
                             successful_client = current_client
                             consecutive_successes_with_client = 1
                         else:
@@ -221,10 +250,12 @@ def collect_all_video_ids(
                         consecutive_failures = 0
                         current_delay = base_delay
                         success = True
+                        _log_with_timestamp(f"[metadata scan] ✓ Successfully processed URL {idx+1}/{total_urls}")
 
                 except (DownloadError, ExtractorError) as exc:
                     error_msg = str(exc)
                     logger.record_exception(exc)
+                    _log_with_timestamp(f"[metadata scan] ❌ DownloadError/ExtractorError: {error_msg[:200]}")
 
                     retry_count += 1
 
@@ -244,40 +275,41 @@ def collect_all_video_ids(
 
                         # Mark that the previously successful client is now failing
                         if old_client == successful_client:
-                            print(f"[metadata scan] ⚠️ Previously successful client '{old_client}' is now failing")
+                            _log_with_timestamp(f"[metadata scan] ⚠️ Previously successful client '{old_client}' is now failing")
                             consecutive_successes_with_client = 0
                             # Don't reset successful_client yet - we'll update it when we find a new working one
 
-                        print(f"[metadata scan] Retryable error detected, rotating client: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
+                        _log_with_timestamp(f"[metadata scan] Retryable error detected, rotating client: {old_client} → {current_client} (attempt {retry_count}/{max_retries})")
 
                         # Add a backoff before retry (with jitter to avoid patterns and bans)
                         # Scale delay based on retry count but keep it reasonable for YouTube
                         retry_delay = min(5 + (retry_count * 3), 20) * random.uniform(0.9, 1.1)
-                        print(f"[metadata scan] Waiting {retry_delay:.1f}s before retry to avoid triggering rate limits...")
+                        _log_with_timestamp(f"[metadata scan] Waiting {retry_delay:.1f}s before retry to avoid triggering rate limits...")
                         time.sleep(retry_delay)
                     else:
                         # Not retryable or out of retries
                         if retry_count >= max_retries:
-                            print(f"[metadata scan] Failed to extract info from {url} after trying all {max_retries} available client(s)")
+                            _log_with_timestamp(f"[metadata scan] ❌ Failed to extract info from {url} after trying all {max_retries} available client(s)")
                         else:
-                            print(f"[metadata scan] Non-retryable error for {url}: {error_msg[:100]}")
+                            _log_with_timestamp(f"[metadata scan] ❌ Non-retryable error for {url}: {error_msg[:100]}")
                         break
 
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.record_exception(exc)
                     retry_count += 1
+                    _log_with_timestamp(f"[metadata scan] ❌ Unexpected exception: {str(exc)[:200]}")
 
                     if retry_count < max_retries:
                         old_client = current_client
                         client_idx = (client_idx + 1) % len(available_clients)
                         current_client = available_clients[client_idx]
-                        print(f"[metadata scan] Unexpected error with client '{old_client}', rotating to '{current_client}' (attempt {retry_count}/{max_retries})")
+                        _log_with_timestamp(f"[metadata scan] Unexpected error with client '{old_client}', rotating to '{current_client}' (attempt {retry_count}/{max_retries})")
 
                         # Add delay with jitter
                         delay = 5 * random.uniform(0.8, 1.2)
                         time.sleep(delay)
                     else:
-                        print(f"[metadata scan] Unexpected error after trying all {max_retries} client(s): {str(exc)[:100]}")
+                        _log_with_timestamp(f"[metadata scan] ❌ Unexpected error after trying all {max_retries} client(s): {str(exc)[:100]}")
                         break
 
             # Update exponential backoff based on success/failure
@@ -285,11 +317,11 @@ def collect_all_video_ids(
                 consecutive_failures += 1
                 # Exponential backoff: double the delay for each consecutive failure
                 current_delay = min(base_delay * (2 ** consecutive_failures), max_backoff_delay)
-                print(f"[metadata scan] Failed to process URL {idx+1}/{total_urls}, increasing delay to {current_delay:.1f}s")
+                _log_with_timestamp(f"[metadata scan] Failed to process URL {idx+1}/{total_urls}, increasing delay to {current_delay:.1f}s")
             else:
                 # Success - reset exponential backoff but maintain base delay
                 if consecutive_failures > 0:
-                    print(f"[metadata scan] Success after {consecutive_failures} consecutive failures, resetting delay")
+                    _log_with_timestamp(f"[metadata scan] Success after {consecutive_failures} consecutive failures, resetting delay")
                 consecutive_failures = 0
                 current_delay = base_delay
 
