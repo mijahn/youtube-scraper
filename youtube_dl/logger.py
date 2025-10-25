@@ -135,6 +135,15 @@ class DownloadLogger:
             return f"[{' '.join(context_parts)}] {message}"
         return message
 
+    def _is_expected_unavailable_error(self, text: str) -> bool:
+        """Check if this is an expected unavailable error that should be suppressed from logs."""
+        lowered = text.lower()
+        # Check for ignored fragments first (these should never be logged)
+        if any(fragment in lowered for fragment in self.IGNORED_FRAGMENTS):
+            return True
+        # Check for unavailable fragments (members-only, private, age-restricted, etc.)
+        return any(fragment in lowered for fragment in self.UNAVAILABLE_FRAGMENTS)
+
     def _print(self, message: str, file=sys.stdout) -> None:
         print(self._format_with_context(message), file=file)
 
@@ -219,16 +228,22 @@ class DownloadLogger:
 
     def warning(self, message) -> None:
         text = self._ensure_text(message)
-        self._print(text, file=sys.stderr)
+        # Check if this is a known unavailable error before printing
+        if not self._is_expected_unavailable_error(text):
+            self._print(text, file=sys.stderr)
         self._handle_message(text)
 
     def error(self, message) -> None:
         text = self._ensure_text(message)
-        self._print(text, file=sys.stderr)
+        # Check if this is a known unavailable error before printing
+        if not self._is_expected_unavailable_error(text):
+            self._print(text, file=sys.stderr)
         self._handle_message(text)
 
     def record_exception(self, exc: Exception) -> None:
         text = self._ensure_text(str(exc))
-        self._print(text, file=sys.stderr)
+        # Check if this is a known unavailable error before printing
+        if not self._is_expected_unavailable_error(text):
+            self._print(text, file=sys.stderr)
         self._last_reported_failure = None
         self._handle_message(text)

@@ -190,10 +190,11 @@ def collect_all_video_ids(
                     _log_with_timestamp(f"[extract] Building yt-dlp options...")
                     ydl_opts = build_ydl_options(args, current_client, logger, noop_hook)
                     ydl_opts["skip_download"] = True
-                    # Enable VERBOSE mode for maximum visibility
-                    ydl_opts["verbose"] = True
-                    ydl_opts["quiet"] = False
-                    ydl_opts["no_warnings"] = False
+                    # Disable verbose mode to prevent stack traces for expected errors (members-only, private videos, etc.)
+                    # The DownloadLogger already handles error categorization and logging
+                    ydl_opts["verbose"] = False
+                    ydl_opts["quiet"] = True
+                    ydl_opts["no_warnings"] = True
                     ydl_opts["progress_hooks"] = []
                     ydl_opts["writethumbnail"] = False
                     ydl_opts["writesubtitles"] = False
