@@ -65,13 +65,25 @@ def _collect_video_ids_from_info(
             title_str = title if isinstance(title, str) else None
             dest.append(VideoMetadata(video_id=video_id_str, title=title_str))
 
-            # Log every 50 videos if progress logging is enabled
-            if log_progress and len(dest) % 50 == 0:
-                _log_with_timestamp(f"[video-collect] Collected {len(dest)} videos so far...")
+            # Enhanced per-video progress logging
+            if log_progress:
+                video_count = len(dest)
+
+                # Log every 10 videos for more granular progress tracking
+                if video_count % 10 == 0:
+                    # Show title preview for every 10th video
+                    title_preview = (title_str[:50] + '...') if title_str and len(title_str) > 50 else (title_str or '(no title)')
+                    _log_with_timestamp(f"[video] 📹 Collected {video_count} videos | Latest: {title_preview}")
+
+                # Show milestone markers for larger numbers
+                elif video_count in [25, 75, 125, 175, 250, 500, 750, 1000, 2000, 5000]:
+                    _log_with_timestamp(f"[video] ✓ Progress milestone: {video_count} videos collected")
 
             return 1
         else:
             # Video already seen (duplicate)
+            if log_progress:
+                _log_with_timestamp(f"[video] ⏭ Skipping duplicate: {video_id_str}")
             return 0
 
     return 0

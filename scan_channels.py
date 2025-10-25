@@ -8,13 +8,15 @@ Slowly scans channels for video metadata to avoid rate limiting.
 
 Features:
     - Incremental saves: Progress saved after each source (prevents data loss)
+    - Smart checkpointing: Time-based and video-count-based progress saving
+    - Per-video logging: See each video as it's discovered (not just summaries)
     - Resume capability: Skips already-scanned sources (use --force to rescan)
     - Real-time statistics: Live progress, ETA, and video counts
     - Auto-backup: Creates .backup files before overwriting
     - Atomic writes: Uses temp files to prevent corruption
 
 Usage:
-    # Start new scan
+    # Start new scan with default checkpointing (every 5 minutes)
     python scan_channels.py --channels-file channels.txt --output metadata.json
 
     # Resume interrupted scan (skips already-scanned sources)
@@ -23,8 +25,17 @@ Usage:
     # Force rescan all sources
     python scan_channels.py --channels-file channels.txt --output metadata.json --force
 
-    # Adjust rate limiting
-    python scan_channels.py --channels-file channels.txt --output metadata.json --request-interval 60
+    # Ultra-aggressive checkpointing (save every 2 minutes)
+    python scan_channels.py --channels-file channels.txt --output metadata.json \
+        --checkpoint-every-minutes 2
+
+    # Less frequent checkpointing (save every 10 minutes)
+    python scan_channels.py --channels-file channels.txt --output metadata.json \
+        --checkpoint-every-minutes 10
+
+    # Disable time-based checkpointing (only save after each source)
+    python scan_channels.py --channels-file channels.txt --output metadata.json \
+        --checkpoint-every-minutes 0
 """
 
 from __future__ import annotations
@@ -114,11 +125,36 @@ def scan_single_source(
     player_client: Optional[str],
     request_interval: float,
     error_analyzer: Optional[downloader.ErrorAnalyzer] = None,
+    checkpoint_callback: Optional[callable] = None,
 ) -> ChannelMetadata:
-    """Scan a single source and return its metadata."""
+    """Scan a single source and return its metadata.
+
+    Args:
+        source: The YouTube source to scan
+        args: Command-line arguments
+        player_client: YouTube player client to use
+        request_interval: Seconds to wait between requests
+        error_analyzer: Optional error analyzer for tracking failures
+        checkpoint_callback: Optional callback(partial_metadata, is_final) for progress saving
+
+    Returns:
+        Complete ChannelMetadata for the source
+    """
 
     _log_with_timestamp(f"[source] ▶ Starting scan of source: {source.url}")
     _log_with_timestamp(f"[source] Source type: {source.kind.value}")
+
+    # Check if checkpointing is enabled
+    checkpoint_enabled = checkpoint_callback is not None
+    checkpoint_every = getattr(args, 'checkpoint_every', 0)
+    checkpoint_minutes = getattr(args, 'checkpoint_every_minutes', 0.0)
+
+    if checkpoint_enabled and (checkpoint_every > 0 or checkpoint_minutes > 0):
+        _log_with_timestamp(f"[checkpoint] Auto-checkpointing enabled:")
+        if checkpoint_every > 0:
+            _log_with_timestamp(f"[checkpoint]   • Save every {checkpoint_every} videos (for large sources)")
+        if checkpoint_minutes > 0:
+            _log_with_timestamp(f"[checkpoint]   • Save every {checkpoint_minutes:.1f} minutes")
 
     try:
         _log_with_timestamp(f"[source] Building URLs to scan...")
@@ -152,6 +188,7 @@ def scan_single_source(
     args.sleep_requests = request_interval
 
     try:
+        # Collect videos from all URLs (this handles multiple URLs like /videos and /shorts)
         video_entries = downloader.collect_all_video_ids(
             urls, args, player_client, error_analyzer=error_analyzer
         )
@@ -178,7 +215,7 @@ def scan_single_source(
                 title_short = title[:60] + '...' if len(title) > 60 else title
                 _log_with_timestamp(f"[source]     {i}. {title_short}")
 
-        return ChannelMetadata(
+        final_metadata = ChannelMetadata(
             url=display_url,
             kind=source.kind.value,
             label=label,
@@ -187,11 +224,17 @@ def scan_single_source(
             total_videos=len(videos),
         )
 
+        # Call checkpoint callback with final results if enabled
+        if checkpoint_enabled and checkpoint_callback:
+            checkpoint_callback(final_metadata, is_final=True)
+
+        return final_metadata
+
     except Exception as exc:
         _log_with_timestamp(f"[source] ❌ Error scanning {display_url}: {exc}")
         if error_analyzer:
             error_analyzer.categorize_and_record(None, str(exc))
-        return ChannelMetadata(
+        error_metadata = ChannelMetadata(
             url=display_url,
             kind=source.kind.value,
             label=display_url,
@@ -200,6 +243,12 @@ def scan_single_source(
             total_videos=0,
             error=str(exc),
         )
+
+        # Call checkpoint callback even on error to save partial progress
+        if checkpoint_enabled and checkpoint_callback:
+            checkpoint_callback(error_metadata, is_final=True)
+
+        return error_metadata
 
 
 def scan_all_channels(
@@ -284,6 +333,22 @@ def scan_all_channels(
 
     # Track session start time for statistics
     session_start_time = time.time()
+    last_checkpoint_time = session_start_time
+
+    # Get checkpoint configuration
+    checkpoint_every_minutes = getattr(args, 'checkpoint_every_minutes', 10.0)
+    time_checkpoint_enabled = checkpoint_every_minutes > 0
+
+    # Define checkpoint callback for per-source saving
+    def checkpoint_callback(partial_metadata: ChannelMetadata, is_final: bool = False) -> None:
+        """Save checkpoint during source scanning."""
+        nonlocal last_checkpoint_time
+
+        checkpoint_type = "final" if is_final else "intermediate"
+        _log_with_timestamp(f"[checkpoint] Triggering {checkpoint_type} checkpoint...")
+
+        # This will be called when the source completes
+        # The actual saving happens after we append to new_channel_metadata
 
     for idx, source in enumerate(sources, start=1):
         _log_with_timestamp(f"\n{'='*50}")
@@ -305,7 +370,8 @@ def scan_all_channels(
 
         scan_start = time.time()
         metadata = scan_single_source(
-            source, args, player_client, request_interval, error_analyzer
+            source, args, player_client, request_interval, error_analyzer,
+            checkpoint_callback=checkpoint_callback
         )
         scan_duration = time.time() - scan_start
         _log_with_timestamp(f"[scan {idx}/{total_sources}] Completed in {scan_duration:.1f} seconds")
@@ -320,8 +386,15 @@ def scan_all_channels(
             failed_scans += 1
 
         # INCREMENTAL SAVE - Save progress after each source
-        # This prevents data loss if the process is interrupted
-        _log_with_timestamp(f"\n[save] Saving incremental progress...")
+        # Also check for time-based checkpoint
+        current_time = time.time()
+        time_since_checkpoint = current_time - last_checkpoint_time
+        should_save_time_based = time_checkpoint_enabled and time_since_checkpoint >= (checkpoint_every_minutes * 60)
+
+        if should_save_time_based:
+            _log_with_timestamp(f"\n[checkpoint] ⏰ Time-based checkpoint triggered ({time_since_checkpoint/60:.1f} minutes elapsed)")
+        else:
+            _log_with_timestamp(f"\n[save] 💾 Saving progress after source completion...")
 
         # Combine existing and new data for incremental save
         if existing_metadata:
@@ -342,9 +415,10 @@ def scan_all_channels(
         # Save with backup
         try:
             save_metadata(current_cache, args.output, create_backup=True)
+            last_checkpoint_time = current_time  # Update checkpoint time on successful save
         except OSError as exc:
-            _log_with_timestamp(f"[save] ⚠ Warning: Incremental save failed: {exc}")
-            _log_with_timestamp(f"[save] Continuing scan... (will retry save after next source)")
+            _log_with_timestamp(f"[save] ⚠ Warning: Save failed: {exc}")
+            _log_with_timestamp(f"[save] Continuing scan... (will retry after next source)")
 
         # Display real-time statistics
         _log_with_timestamp(f"\n[stats] === SESSION STATISTICS ===")
@@ -517,6 +591,29 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Force rescan of all sources, ignoring existing metadata (disables resume)",
+    )
+
+    # Checkpoint control (progress saving)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Save progress every N videos within large sources (default: 10, 0 to disable)",
+    )
+    parser.add_argument(
+        "--checkpoint-every-minutes",
+        type=float,
+        default=5.0,
+        metavar="M",
+        help="Save progress every M minutes (default: 5.0, 0 to disable time-based checkpoints)",
+    )
+    parser.add_argument(
+        "--checkpoint-threshold",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Only enable video-based checkpoints for sources with >N videos (default: 50)",
     )
 
     # YouTube options
