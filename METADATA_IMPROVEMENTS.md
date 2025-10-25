@@ -1,12 +1,20 @@
 # Metadata.json Robustness Improvements
 
+> **📢 NEW: Smart Checkpointing System (2025-10-25)**
+>
+> The scanner now includes **time-based checkpointing** that saves progress every 5 minutes by default, providing even stronger protection against data loss. See [CHECKPOINT_STRATEGY.md](CHECKPOINT_STRATEGY.md) for complete details.
+>
+> **Key Enhancement:** Never lose more than 5 minutes of work, regardless of channel size or scan duration.
+
 ## Overview
 Enhanced `scan_channels.py` to prevent data loss and provide real-time visibility into scanning progress.
 
 ## Critical Problem Solved
 **BEFORE:** The scanner only saved metadata.json after ALL sources were scanned. If the process crashed or was interrupted, you would lose ALL progress (potentially days of scanning).
 
-**AFTER:** Progress is saved after EACH source is scanned. You can safely interrupt and resume scanning at any time.
+**AFTER (v1):** Progress is saved after EACH source is scanned. You can safely interrupt and resume scanning at any time.
+
+**AFTER (v2 - Current):** Progress is saved after each source AND every 5 minutes, ensuring you never lose more than 5 minutes of work even on mega-channels.
 
 ## New Features
 
