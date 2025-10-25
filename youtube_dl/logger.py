@@ -138,10 +138,16 @@ class DownloadLogger:
     def _print(self, message: str, file=sys.stdout) -> None:
         print(self._format_with_context(message), file=file)
 
-    def _handle_message(self, text: str) -> None:
+    def _handle_message(self, text: str) -> bool:
+        """
+        Handle a message and determine if it should be printed.
+
+        Returns:
+            True if the message should be printed, False if it should be suppressed.
+        """
         lowered = text.lower()
         if any(fragment in lowered for fragment in self.IGNORED_FRAGMENTS):
-            return
+            return False
 
         parsed_video_id: Optional[str] = None
         match = self.YOUTUBE_ID_PATTERN.search(text)
@@ -179,15 +185,15 @@ class DownloadLogger:
 
             key = (video_id, lowered)
             if key == self._last_reported_failure:
-                return
+                return False  # Suppress duplicate unavailable errors
             self._last_reported_failure = key
             if self._failure_callback:
                 self._failure_callback(video_id)
-            return
+            return True  # Print non-duplicate unavailable errors
 
         key = (video_id, lowered)
         if key == self._last_reported_failure:
-            return
+            return False  # Suppress duplicate errors
 
         if is_retryable:
             if video_id:
@@ -204,6 +210,7 @@ class DownloadLogger:
         self._last_reported_failure = key
         if self._failure_callback:
             self._failure_callback(video_id)
+        return True  # Print non-duplicate errors
 
     @staticmethod
     def _ensure_text(message) -> str:
@@ -219,16 +226,16 @@ class DownloadLogger:
 
     def warning(self, message) -> None:
         text = self._ensure_text(message)
-        self._print(text, file=sys.stderr)
-        self._handle_message(text)
+        if self._handle_message(text):
+            self._print(text, file=sys.stderr)
 
     def error(self, message) -> None:
         text = self._ensure_text(message)
-        self._print(text, file=sys.stderr)
-        self._handle_message(text)
+        if self._handle_message(text):
+            self._print(text, file=sys.stderr)
 
     def record_exception(self, exc: Exception) -> None:
         text = self._ensure_text(str(exc))
-        self._print(text, file=sys.stderr)
         self._last_reported_failure = None
-        self._handle_message(text)
+        if self._handle_message(text):
+            self._print(text, file=sys.stderr)
